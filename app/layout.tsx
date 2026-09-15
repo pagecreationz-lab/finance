@@ -1,4 +1,4 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
 import './globals.css';
 
@@ -16,6 +16,11 @@ export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'),
   title: 'FundFlow — Lending & Collections',
   description: 'Role-based lending, repayment collection and portfolio management.',
+  applicationName: 'FundFlow Finance OS',
+  manifest: '/manifest.webmanifest',
+  appleWebApp: { capable: true, statusBarStyle: 'default', title: 'FundFlow' },
+  formatDetection: { telephone: false },
+  icons: { icon: '/pwa-192.png', apple: '/pwa-192.png' },
   openGraph: {
     title: 'FundFlow — Lending & Collections',
     description: 'Lending and collections, in one flow.',
@@ -29,13 +34,18 @@ export const metadata: Metadata = {
   },
 };
 
+export const viewport: Viewport = {
+  themeColor: '#0c3327',
+  colorScheme: 'light',
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >

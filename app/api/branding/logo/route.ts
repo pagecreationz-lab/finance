@@ -1,9 +1,9 @@
-import { getSupabaseAdmin, STORAGE_BUCKET } from '@/lib/supabase-admin';
+import { getSupabaseAdmin, hasSupabaseConfig, STORAGE_BUCKET } from '@/lib/supabase-admin';
 import { readLocalBranding } from '@/lib/local-branding-store';
 
 export const runtime='nodejs';
 export const dynamic='force-dynamic';
-const hasSupabase=()=>Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL&&process.env.SUPABASE_SERVICE_ROLE_KEY);
+const hasSupabase=hasSupabaseConfig;
 
 export async function GET(request:Request){
   try{
@@ -16,4 +16,5 @@ export async function GET(request:Request){
     return new Response(result.data,{headers:{'Content-Type':result.data.type||'image/png','Cache-Control':'no-store'}});
   }catch{return new Response(null,{status:404})}
 }
+
 
