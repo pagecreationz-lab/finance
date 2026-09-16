@@ -25,7 +25,7 @@ type NavItem = { label: string; icon: typeof LayoutDashboard; badge?: string };
 const adminNav: NavItem[] = [
   { label: 'Overview', icon: LayoutDashboard }, { label: 'Customers', icon: UsersRound },
   { label: 'Loans', icon: WalletCards, badge: '24' }, { label: 'Collections', icon: HandCoins },
-  { label: 'Agents', icon: UserRound }, { label: 'Reports', icon: FileText }, { label: 'Logs', icon: History }, { label: 'Reminders', icon: MessageCircle },
+  { label: 'Agents', icon: UserRound }, { label: 'Reports', icon: FileText }, { label: 'Reminders', icon: MessageCircle },
 ];
 
 const roleNav: Record<Role, NavItem[]> = {
@@ -79,7 +79,7 @@ export default function Home() {
   if(!session)return <LoginPage onLogin={(user)=>{setSession(user);setActive(roleNav[user.role][0].label)}}/>;
   return <main className="min-h-screen bg-[#f3f7f5] text-[#15261f]">
     <aside className={`fixed inset-y-0 left-0 z-40 flex w-[250px] flex-col bg-[#0c3327] text-white transition-transform lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
-      <div className="flex h-[76px] items-center justify-between border-b border-white/10 px-6"><div className="flex items-center gap-3">{customLogo?<img src={"/api/branding/logo?v="+brandVersion} alt="FundFlow logo" className="size-9 rounded-xl bg-white object-contain p-1"/>:<div className="grid size-9 place-items-center rounded-xl bg-[#d9ff54] text-[#16372b]"><CircleDollarSign className="size-5" /></div>}<div><div className="text-[17px] font-bold tracking-tight">FundFlow</div><div className="text-[10px] font-medium uppercase tracking-[.16em] text-white/50">Finance Lending Platform</div></div></div><button className="lg:hidden" onClick={() => setSidebarOpen(false)} aria-label="Close menu"><X className="size-5" /></button></div>
+      <div className="flex h-[76px] items-center justify-between border-b border-white/10 px-6"><div className="flex items-center gap-3">{customLogo?<img src={"/api/branding/logo?v="+brandVersion} alt="FundFlow logo" className="size-9 rounded-xl bg-white object-contain p-1"/>:<div className="grid size-9 place-items-center rounded-xl bg-[#d9ff54] text-[#16372b]"><CircleDollarSign className="size-5" /></div>}<div><div className="text-[17px] font-bold tracking-tight">FundFlow</div><div className="text-[10px] font-medium uppercase tracking-[.16em] text-white/50"></div></div></div><button className="lg:hidden" onClick={() => setSidebarOpen(false)} aria-label="Close menu"><X className="size-5" /></button></div>
       <div className="px-4 py-5"><p className="px-3 pb-2 text-[10px] font-semibold uppercase tracking-[.17em] text-white/40">Workspace</p><nav className="space-y-1">{nav.map((item) => <button key={item.label} onClick={() => {setActive(item.label);setSidebarOpen(false)}} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition ${active === item.label ? 'bg-white text-[#12372b] shadow-sm' : 'text-white/70 hover:bg-white/8 hover:text-white'}`}><item.icon className="size-4" /><span>{item.label}</span>{item.badge && <span className="ml-auto rounded-full bg-[#d9ff54] px-2 py-0.5 text-[10px] font-bold text-[#16372b]">{item.badge}</span>}</button>)}</nav></div>
       <div className="mt-auto p-4">{role==='admin'&&<button onClick={()=>setModal('settings')} className="mb-3 flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-white/65 hover:bg-white/8"><Settings className="size-4"/> Settings</button>}<button type="button" onClick={()=>role==='admin'&&setModal('profile')} className="w-full rounded-2xl border border-white/10 bg-white/7 p-3 text-left transition hover:bg-white/10"><div className="flex items-center gap-3"><div className="grid size-9 place-items-center rounded-full bg-[#d9ff54] text-xs font-bold text-[#183c2e]">{session.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase()}</div><div className="min-w-0"><p className="truncate text-sm font-semibold">{session.name}</p><p className="text-xs text-white/45">{role==='admin'?'Profile & password':roleName[role]}</p></div>{role==='admin'?<Pencil className="ml-auto size-4 text-white/50"/>:<ChevronDown className="ml-auto size-4 text-white/50" />}</div></button></div>
     </aside>
@@ -129,10 +129,14 @@ function AdminSection({active,period,setPeriod,open,notify,assignments,assignCus
   if(active==='Loans') return <LoanSection open={open} notify={notify}/>;
   if(active==='Collections') return <CollectionSection open={open} notify={notify}/>;
   if(active==='Agents') return <AgentSection notify={notify} manageAgent={manageAgent}/>;
-  if(active==='Logs') return <AuditLogSection notify={notify}/>;
-  return <ReportSection period={period} setPeriod={setPeriod} notify={notify}/>;
+
+  return <ReportsWorkspace period={period} setPeriod={setPeriod} notify={notify}/>;
 }
 
+function ReportsWorkspace({period,setPeriod,notify}:{period:string;setPeriod:(v:string)=>void;notify:(m:string)=>void}) {
+  const [view,setView]=useState<'reports'|'logs'>('reports');
+  return <><nav aria-label="Reports sections" className="mb-6 flex flex-wrap gap-2"><Button variant={view==='reports'?'default':'outline'} aria-pressed={view==='reports'} onClick={()=>setView('reports')}><FileText/> Financial reports</Button><Button variant={view==='logs'?'default':'outline'} aria-pressed={view==='logs'} onClick={()=>setView('logs')}><History/> Logs</Button></nav>{view==='logs'?<AuditLogSection notify={notify}/>:<ReportSection period={period} setPeriod={setPeriod} notify={notify}/>}</>;
+}
 function ReportSection({period,setPeriod,notify}:{period:string;setPeriod:(v:string)=>void;notify:(m:string)=>void}) {
   const [data,setData]=useState<any>({customers:[],loans:[],collections:[],agents:[],summary:{}});const [loading,setLoading]=useState(true);
   const load=async()=>{try{setData(await getData());}catch(error){notify(error instanceof Error?error.message:'Report loading failed');}finally{setLoading(false);}};
