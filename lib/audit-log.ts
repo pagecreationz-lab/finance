@@ -33,7 +33,7 @@ function metadata(action:AuditAction,body:Record<string,unknown>){
   if(action==='delete_customers')return {requested_ids:Array.isArray(body.ids)?body.ids.map(String):[],deleted_ids:body.deleted_ids||[],blocked_ids:body.blocked_ids||[]};
   if(action==='assign_customer')return {agent_id:body.agent_id||null};
   if(action==='create_loan')return {customer_id:body.customer_id,principal:Number(body.principal),interest_type:body.interest_type,interest_rate:Number(body.interest_rate),repayment_frequency:body.repayment_frequency};
-  if(action==='update_loan')return {interest_rate:Number(body.interest_rate),next_due_date:body.next_due_date,remarks:body.remarks||null};
+  if(action==='update_loan')return {repayment_frequency:body.repayment_frequency,interest_rate:Number(body.interest_rate),next_due_date:body.next_due_date,remarks:body.remarks||null};
   if(action==='foreclose_loan')return {settlement_amount:Number(body.amount),waived_amount:body.waived_amount,original_balance:body.original_balance,remarks:body.remarks,proof_file_key:body.proof_file_key||null};
   if(action==='reopen_loan')return {restored_balance:Number(body.restored_balance),reason:body.reason,previous_foreclosure:body.previous_foreclosure};
   if(action==='create_collection'||action==='update_collection')return {loan_id:body.loan_id||null,amount:Number(body.amount),method:body.method,remarks:body.remarks||null,proof_attached:Boolean(body.proof_file_key)};
