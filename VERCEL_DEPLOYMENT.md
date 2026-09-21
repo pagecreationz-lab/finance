@@ -1,4 +1,4 @@
-# FundFlow Vercel deployment
+# RMV Finance Vercel deployment
 
 ## 1. Create the Supabase backend
 
@@ -6,7 +6,7 @@
 2. Open **SQL Editor** in Supabase.
 3. Run the complete [`supabase/schema.sql`](supabase/schema.sql) file once.
 4. In **Project Settings > API Keys**, copy the project URL and secret key.
-5. For an existing FundFlow database, also run `supabase/auth-migration.sql` once.
+5. For an existing RMV Finance database, also run `supabase/auth-migration.sql` once.
 
 The schema creates the finance tables, indexes, sample records, Row Level Security,
 and the private `fundflow-files` storage bucket.
@@ -40,7 +40,7 @@ Install command: npm install
 After the first deployment, update `NEXT_PUBLIC_SITE_URL` to the final Vercel or
 custom-domain URL and redeploy.
 
-FundFlow uses its own sign-in page. The super admin signs in with `FUNDFLOW_ADMIN_USER` and `FUNDFLOW_ADMIN_PASSWORD`; agent credentials are created and managed by the super admin. Customer portal login and credential creation are temporarily paused unless `FUNDFLOW_CUSTOMER_LOGIN_ENABLED=true`.
+RMV Finance uses its own sign-in page. The super admin signs in with `FUNDFLOW_ADMIN_USER` and `FUNDFLOW_ADMIN_PASSWORD`; agent credentials are created and managed by the super admin. Customer portal login and credential creation are temporarily paused unless `FUNDFLOW_CUSTOMER_LOGIN_ENABLED=true`.
 
 ## 4. Local Supabase testing
 

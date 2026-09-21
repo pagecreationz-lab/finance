@@ -14,23 +14,23 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'),
-  title: 'FundFlow — Lending & Collections',
+  title: 'RMV Finance — Lending & Collections',
   description: 'Role-based lending, repayment collection and portfolio management.',
-  applicationName: 'FundFlow Finance OS',
+  applicationName: 'RMV Finance',
   manifest: '/manifest.webmanifest',
-  appleWebApp: { capable: true, statusBarStyle: 'default', title: 'FundFlow' },
+  appleWebApp: { capable: true, statusBarStyle: 'default', title: 'RMV Finance' },
   formatDetection: { telephone: false },
   icons: { icon: '/pwa-192.png', apple: '/pwa-192.png' },
   openGraph: {
-    title: 'FundFlow — Lending & Collections',
+    title: 'RMV Finance — Lending & Collections',
     description: 'Lending and collections, in one flow.',
-    images: [{ url: '/og.png', width: 1200, height: 630, alt: 'FundFlow finance operations portal' }],
+    images: [{ url: '/rmv-finance-logo.jpeg', width: 1254, height: 1254, alt: 'RMV Finance finance operations portal' }],
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'FundFlow — Lending & Collections',
+    title: 'RMV Finance — Lending & Collections',
     description: 'Lending and collections, in one flow.',
-    images: ['/og.png'],
+    images: ['/rmv-finance-logo.jpeg'],
   },
 };
 

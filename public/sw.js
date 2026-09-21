@@ -1,5 +1,5 @@
-const CACHE_NAME = 'fundflow-shell-v1';
-const APP_SHELL = ['/', '/offline.html', '/favicon.svg', '/pwa-192.png', '/pwa-512.png', '/pwa-maskable-512.png'];
+const CACHE_NAME = 'rmv-finance-shell-v2';
+const APP_SHELL = ['/', '/offline.html', '/rmv-finance-logo.jpeg', '/pwa-192.png', '/pwa-512.png', '/pwa-maskable-512.png'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)));

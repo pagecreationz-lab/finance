@@ -28,7 +28,7 @@ export const defaultReminderSettings: ReminderSettings = {
   agentCanSend: true,
   offsets: [3, 2, 0],
   automaticKinds: ['due'],
-  businessName: 'FundFlow',
+  businessName: 'RMV Finance',
   dueTemplate:
     'Hello {customer}, loan {loan_id} is due on {due_date}. Outstanding balance: INR {balance}. Please contact {business_name} for your repayment amount.',
   balanceTemplate:

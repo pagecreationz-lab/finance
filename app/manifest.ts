@@ -3,8 +3,8 @@ import type { MetadataRoute } from 'next';
 export default function manifest(): MetadataRoute.Manifest {
   return {
     id: '/',
-    name: 'FundFlow Finance OS',
-    short_name: 'FundFlow',
+    name: 'RMV Finance',
+    short_name: 'RMV Finance',
     description: 'Secure lending, assigned collections and portfolio reporting.',
     start_url: '/',
     scope: '/',
