@@ -10,3 +10,5 @@
 .admin-sidebar-scroll::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
 
 .admin-sidebar-scroll::-webkit-scrollbar-button { display: none !important; width: 0; height: 0; }
+
+.receipt-dialog svg[aria-label="Customer signature"] { width: min(100%, 24rem); height: 8rem; justify-self: start; }

@@ -1,0 +1,16 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),ts=require('typescript'),path=require('node:path');
+const out={};new Function('exports',ts.transpileModule(fs.readFileSync(path.join(__dirname,'../lib/collection-records.ts'),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText)(out);
+const {validSignature,validDate,collectionLedger}=out;
+assert.equal(validSignature([]),false);assert.equal(validSignature([[[0,0]]]),false);
+assert.equal(validSignature([[[0,0],[.1,.1],[.2,.1],[.3,.2],[.4,.1]]]),true);
+assert.equal(validSignature([[[0,0],[1,1],[2,2],[.1,.1],[.2,.2]]]),false);
+assert.equal(validDate('2026-02-30'),false);assert.equal(validDate('2028-02-29'),true);
+assert.equal(collectionLedger([],'weekly','2026-02').length,4);
+assert.equal(collectionLedger([],'weekly','2028-02').length,5);
+assert.equal(collectionLedger([],'daily','2026-04').length,30);
+assert.equal(collectionLedger([],'daily','2026-05').length,31);
+assert.equal(collectionLedger([],'yearly','2026-01').length,12);
+const receipts=[{amount:10,collected_at:Date.parse('2026-09-07T18:45:00Z')/1000},{amount:20,collected_at:Date.parse('2026-09-29T10:00:00Z')/1000},{amount:99,collected_at:Date.parse('2025-09-29T10:00:00Z')/1000}];
+const weeks=collectionLedger(receipts,'weekly','2026-09');assert.equal(weeks[0].amount,0);assert.equal(weeks[1].amount,10);assert.equal(weeks[4].amount,20);
+assert.equal(collectionLedger(receipts,'yearly','2026-01')[8].amount,30);
+console.log('PASS: required signatures, coordinate bounds, date validation, India-time daily/weekly/yearly totals, leap years and empty periods.');

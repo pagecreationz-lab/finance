@@ -1,3 +1,4 @@
+import { access, requirePermission } from '@/lib/rbac';
 import { AuthError, requireAdmin, requireSession } from '@/lib/auth';
 import { appendAuditLog } from '@/lib/audit-log';
 import {
@@ -29,7 +30,7 @@ const fail = (error: unknown) =>
   );
 export async function GET(request: Request) {
   try {
-    const session = requireSession(request);
+    const {session,permissions} = await access(request);requirePermission(permissions,'reminders');
     const [scope, store] = await Promise.all([
       scopeReminders(session),
       readReminders(session.role === 'agent' ? session.id : undefined),
@@ -77,7 +78,7 @@ export async function POST(request: Request) {
     const origin = request.headers.get('origin');
     if (origin && origin !== new URL(request.url).origin)
       throw new AuthError('Cross-origin requests are not permitted', 403);
-    const session = requireSession(request);
+    const {session,permissions} = await access(request);requirePermission(permissions,'reminders');
     await scopeReminders(session);
     const body = await request.json();
     if (body.action === 'settings') {

@@ -14,7 +14,7 @@ type Settings = Omit<ReminderSettings, 'tokenEncrypted'> & {
   tokenConfigured?: boolean;
 };
 type Snapshot = {
-  role: 'admin' | 'agent';
+  role: 'admin' | 'manager' | 'agent';
   settings: Settings;
   customers: { id: string; name: string; phone: string }[];
   loans: {

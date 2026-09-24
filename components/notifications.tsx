@@ -24,7 +24,7 @@ export function Notifications({userId,role,navigate}:{userId:string;role:string;
           id:'due:'+l.id+':'+l.next_due_date+':'+(l.next_due_date<today?'overdue':'today')+':'+l.balance,
           title:(l.next_due_date<today?'Overdue loan':'Loan due today')+' · '+l.customer_name,
           detail:l.id+' · Due '+l.next_due_date+' · Outstanding '+money(l.balance),
-          target:role==='admin'?'Loans':role==='agent'?'Assigned customers':'My loan'
+          target:(role==='admin'||role==='manager')?'Loans':role==='agent'?'Assigned customers':'My loan'
         }));
         const receipts:Notice[]=(data.collections as Receipt[]).filter(r=>r.collected_at*1000>=Date.now()-7*86400000).sort((a,b)=>b.collected_at-a.collected_at).map(r=>({
           id:'receipt:'+r.id+':'+r.amount,title:'Payment recorded · '+r.customer_name,

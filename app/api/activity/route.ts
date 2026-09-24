@@ -1,9 +1,9 @@
-import { requireSession } from '@/lib/auth';
+import { access } from '@/lib/rbac';
 import { appendAuditLog } from '@/lib/audit-log';
 export async function POST(request:Request){
   try{
-    const session=requireSession(request);
-    if(!['admin','agent'].includes(session.role))return Response.json({error:'Forbidden'},{status:403});
+    const {session}=await access(request);
+    if(!['admin','manager','agent'].includes(session.role))return Response.json({error:'Forbidden'},{status:403});
     const body=await request.json();
     const activity=String(body.activity||'').trim().slice(0,120);
     if(!activity)return Response.json({error:'Activity is required'},{status:400});

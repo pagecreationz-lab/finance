@@ -29,7 +29,7 @@ export async function scopeReminders(session: AppSession) {
   const customers = data.users.filter(
     (user) =>
       user.role === 'customer' &&
-      (session.role === 'admin' || user.assigned_agent_id === session.id),
+      (['admin','manager'].includes(session.role) || user.assigned_agent_id === session.id),
   );
   const ids = new Set(customers.map((user) => user.id));
   return {

@@ -1,3 +1,5 @@
+import { access, requirePermission, actionPermission } from '@/lib/rbac';
+import { validSignature, validDate } from '@/lib/collection-records';
 import { getSupabaseAdmin, hasSupabaseConfig } from '@/lib/supabase-admin';
 import { AuthError, hashPassword, requireAdmin, requireSession, type AppSession } from '@/lib/auth';
 import { mutateLocalStore, readLocalStore, type LocalFinanceData, type StoredAuditLog, type StoredCollection, type StoredLoan, type StoredUser } from '@/lib/local-data-store';
@@ -23,7 +25,7 @@ function snapshot(users:StoredUser[], loanRows:StoredLoan[], collectionRows:Stor
   const userById=new Map(users.map(user=>[user.id,user])),loanById=new Map(loanRows.map(loan=>[loan.id,loan]));
   const customers=users.filter(user=>user.role==='customer').map(user=>{
     const active=loanRows.filter(loan=>loan.customer_id===user.id&&!['closed','foreclosed'].includes(loan.status));
-    return {id:user.id,name:user.name,phone:user.phone,email:user.email,username:user.username||'',assigned_agent_id:user.assigned_agent_id,agent_name:user.assigned_agent_id?userById.get(user.assigned_agent_id)?.name||null:null,active_loans:active.length,outstanding:active.reduce((sum,loan)=>sum+n(loan.balance),0),kyc:'Verified'};
+    return {id:user.id,name:user.name,phone:user.phone,email:user.email,occupation:user.occupation||null,username:user.username||'',assigned_agent_id:user.assigned_agent_id,agent_name:user.assigned_agent_id?userById.get(user.assigned_agent_id)?.name||null:null,active_loans:active.length,outstanding:active.reduce((sum,loan)=>sum+n(loan.balance),0),kyc:'Verified'};
   });
   const loans=loanRows.map(loan=>{
     const customer=userById.get(loan.customer_id);
@@ -32,7 +34,7 @@ function snapshot(users:StoredUser[], loanRows:StoredLoan[], collectionRows:Stor
   });
   const collections=collectionRows.map(item=>{
     const loan=loanById.get(item.loan_id),customer=loan?userById.get(loan.customer_id):undefined;
-    return {...item,customer_name:customer?.name||'Unknown customer',agent_name:userById.get(item.agent_id)?.name||'Unknown agent',loan_balance:loan?.balance||0};
+    return {...item,customer_name:customer?.name||'Unknown customer',agent_name:item.collected_by_name||userById.get(item.agent_id||'')?.name||'Unknown collector',loan_balance:loan?.balance||0};
   });
   const agents=users.filter(user=>user.role==='agent').map(agent=>({id:agent.id,name:agent.name,phone:agent.phone,email:agent.email,username:agent.username||'',assigned:users.filter(user=>user.role==='customer'&&user.assigned_agent_id===agent.id).length,collected:collectionRows.filter(item=>item.agent_id===agent.id).reduce((sum,item)=>sum+n(item.amount),0)}));
   const summary={customer_count:customers.length,loan_count:loans.length,disbursed:loanRows.reduce((sum,loan)=>sum+n(loan.principal),0),outstanding:loanRows.filter(loan=>loan.status!=='closed').reduce((sum,loan)=>sum+n(loan.balance),0),collected:collectionRows.reduce((sum,item)=>sum+n(item.amount),0),agent_count:agents.length};
@@ -40,7 +42,7 @@ function snapshot(users:StoredUser[], loanRows:StoredLoan[], collectionRows:Stor
 }
 
 function scopeRows(data:LocalFinanceData,session:AppSession):LocalFinanceData{
-  if(session.role==='admin')return data;
+  if(session.role==='admin'||session.role==='manager')return {...data,audit_logs:session.role==='admin'?data.audit_logs:[]};
   if(session.role==='agent'){
     const customerIds=new Set(data.users.filter(user=>user.role==='customer'&&user.assigned_agent_id===session.id).map(user=>user.id));
     const loanIds=new Set(data.loans.filter(loan=>customerIds.has(loan.customer_id)).map(loan=>loan.id));
@@ -56,10 +58,10 @@ async function localAction(body:Record<string,unknown>,session:AppSession) {
   await mutateLocalStore((data:LocalFinanceData)=>{
     if(action==='create_customer'){
       if(!String(body.name||'').trim()||!String(body.phone||'').trim())throw new ApiError('Name and mobile number are required');
-      data.users.push({id:String(body._entity_id),name:String(body.name).trim(),phone:String(body.phone).trim(),email:String(body.email||'').trim()||null,role:'customer',assigned_agent_id:String(body.agent_id||'')||null,created_at:now,username:null,password_hash:null});
+      data.users.push({id:String(body._entity_id),name:String(body.name).trim(),phone:String(body.phone).trim(),email:String(body.email||'').trim()||null,role:'customer',occupation:String(body.occupation).trim(),assigned_agent_id:String(body.agent_id||'')||null,created_at:now,username:null,password_hash:null});
     } else if(action==='update_customer'){
       const user=data.users.find(item=>item.id===String(body.id)&&item.role==='customer');if(!user)throw new ApiError('Customer not found',404);
-      user.name=String(body.name||'').trim();user.phone=String(body.phone||'').trim();user.email=String(body.email||'').trim()||null;
+      user.occupation=String(body.occupation).trim();user.name=String(body.name||'').trim();user.phone=String(body.phone||'').trim();user.email=String(body.email||'').trim()||null;
     } else if(action==='delete_customers'){
       const ids=Array.isArray(body.ids)?body.ids.map(String):[];
       const blocked=new Set(data.loans.filter(loan=>ids.includes(loan.customer_id)&&(n(loan.balance)>0||!['closed','foreclosed'].includes(loan.status))).map(loan=>loan.customer_id));
@@ -76,13 +78,13 @@ async function localAction(body:Record<string,unknown>,session:AppSession) {
       const principal=Number(body.principal),customerId=String(body.customer_id||'');
       if(!customerId||!Number.isFinite(principal)||principal<=0)throw new ApiError('Customer and valid principal are required');
       if(!data.users.some(item=>item.id===customerId&&item.role==='customer'))throw new ApiError('Customer not found',404);
-      data.loans.push({id:String(body._entity_id),customer_id:customerId,principal,balance:principal,interest_type:String(body.interest_type||'fixed'),interest_rate:Number(body.interest_rate||0),repayment_frequency:String(body.repayment_frequency||'monthly'),given_date:String(body.given_date),next_due_date:String(body.next_due_date),security_type:String(body.security_type||'asset'),security_file_key:String(body.security_file_key||'')||null,remarks:String(body.remarks||'')||null,status:'active'});
+      data.loans.push({id:String(body._entity_id),customer_id:customerId,principal,balance:principal,interest_type:String(body.interest_type||'fixed'),interest_rate:Number(body.interest_rate||0),repayment_frequency:String(body.repayment_frequency||'monthly'),given_date:String(body.given_date),end_date:String(body.end_date),next_due_date:String(body.next_due_date),security_type:String(body.security_type||'asset'),security_file_key:String(body.security_file_key||'')||null,remarks:String(body.remarks||'')||null,status:'active'});
     } else if(action==='create_collection'){
       const amount=Number(body.amount),loanId=String(body.loan_id||''),loan=data.loans.find(item=>item.id===loanId);
-      if(!loanId||!Number.isFinite(amount)||amount<=0)throw new ApiError('Loan and valid collection amount are required');
+      if(!loanId||!Number.isSafeInteger(amount)||amount<=0)throw new ApiError('Loan and valid collection amount are required');
       if(!loan)throw new ApiError('Loan not found',404);if(session.role==='agent'&&!data.users.some(user=>user.id===loan.customer_id&&user.assigned_agent_id===session.id))throw new AuthError('This customer is not assigned to you',403);
-      if(amount>n(loan.balance))throw new ApiError('Collection cannot exceed the outstanding balance');
-      data.collections.unshift({id:String(body._entity_id),loan_id:loanId,agent_id:session.role==='agent'?session.id:String(body.agent_id||'agent-deepak'),amount,method:String(body.method||'Cash'),proof_file_key:String(body.proof_file_key||'')||null,remarks:String(body.remarks||'')||null,collected_at:now});
+      if(['closed','foreclosed'].includes(loan.status))throw new ApiError('Loan is closed');if(amount>n(loan.balance))throw new ApiError('Collection cannot exceed the outstanding balance');
+      data.collections.unshift({id:String(body._entity_id),loan_id:loanId,agent_id:session.role==='agent'?session.id:null,collected_by_name:session.name,amount,method:String(body.method||'Cash'),proof_file_key:String(body.proof_file_key||'')||null,remarks:String(body.remarks||'')||null,collected_at:now,customer_signature:validSignature(body.customer_signature)?body.customer_signature:null,signature_at:validSignature(body.customer_signature)?now:null});
       loan.balance=n(loan.balance)-amount;if(loan.balance<=0)loan.status='closed';
     } else if(action==='foreclose_loan'){
       const loan=data.loans.find(item=>item.id===String(body.id));if(!loan)throw new ApiError('Loan not found',404);if(loan.status==='closed'||loan.status==='foreclosed')throw new ApiError('Only an open loan can be foreclosed');
@@ -93,11 +95,11 @@ async function localAction(body:Record<string,unknown>,session:AppSession) {
       const reason=String(body.reason||'').trim();if(!reason)throw new ApiError('A reopen reason is required');const restored=n(loan.foreclosure_amount)+n(loan.foreclosure_waived);const customer=data.users.find(user=>user.id===loan.customer_id);if(customer?.role==='archived_customer')customer.role='customer';body.restored_balance=restored;body.previous_foreclosure={amount:loan.foreclosure_amount,waived:loan.foreclosure_waived,proof:loan.foreclosure_proof_file_key,remarks:loan.foreclosure_remarks,at:loan.foreclosed_at};loan.balance=restored;loan.status=loan.next_due_date<new Date().toISOString().slice(0,10)?'overdue':'active';loan.reopened_at=now;loan.reopen_reason=reason;loan.reopened_by=session.name;
     } else if(action==='update_loan'){
       const loan=data.loans.find(item=>item.id===String(body.id));if(!loan)throw new ApiError('Loan not found',404);if(session.role==='agent'&&!data.users.some(user=>user.id===loan.customer_id&&user.assigned_agent_id===session.id))throw new AuthError('This customer is not assigned to you',403);
-      if(body.repayment_frequency!==undefined)loan.repayment_frequency=String(body.repayment_frequency);loan.interest_rate=Number(body.interest_rate);loan.next_due_date=String(body.next_due_date);loan.remarks=String(body.remarks||'')||null;
+      if(body.repayment_frequency!==undefined)loan.repayment_frequency=String(body.repayment_frequency);loan.end_date=String(body.end_date);loan.interest_rate=Number(body.interest_rate);loan.next_due_date=String(body.next_due_date);loan.remarks=String(body.remarks||'')||null;
     } else if(action==='update_collection'){
       const id=String(body.id),amount=Number(String(body.amount).replace(/[^0-9.]/g,'')),receipt=data.collections.find(item=>item.id===id);
       if(!Number.isFinite(amount)||amount<=0)throw new ApiError('Valid receipt and amount are required');
-      if(!receipt)throw new ApiError('Receipt not found',404);if(session.role==='agent'&&receipt.agent_id!==session.id)throw new AuthError('You can edit only your own collections',403);
+      if(!receipt)throw new ApiError('Receipt not found',404);if(receipt.customer_signature)throw new ApiError('Signed receipts cannot be edited.');if(session.role==='agent'&&receipt.agent_id!==session.id)throw new AuthError('You can edit only your own collections',403);
       const loan=data.loans.find(item=>item.id===receipt.loan_id);if(!loan)throw new ApiError('Loan not found',404);if(session.role==='agent'&&!data.users.some(user=>user.id===loan.customer_id&&user.assigned_agent_id===session.id))throw new AuthError('This customer is not assigned to you',403);
       if(loan.status==='foreclosed')throw new ApiError('Reopen the loan before editing its collections');body.loan_id=receipt.loan_id;
       const balance=n(loan.balance)+n(receipt.amount)-amount;if(balance<0)throw new ApiError('Collection cannot exceed the outstanding balance');
@@ -120,28 +122,52 @@ async function localAction(body:Record<string,unknown>,session:AppSession) {
   });
 }
 
+function permittedSnapshot(data:ReturnType<typeof snapshot>,permissions:string[],role:string){
+  if(role==='admin'||role==='customer')return data;
+  return {...data,customers:permissions.includes('customers')?data.customers:[],loans:permissions.includes('loans')?data.loans:[],collections:permissions.includes('collections')?data.collections:[],agents:permissions.includes('agents')?data.agents:[],summary:{},audit_logs:[]};
+}
+import {effectiveCollections} from '@/lib/receipt-corrections';
 export async function GET(request:Request){
   try{
-    const session=requireSession(request);
-    if(useLocalStore(request)){const scoped=scopeRows(await readLocalStore(),session);return Response.json({...snapshot(scoped.users,scoped.loans,scoped.collections,scoped.audit_logs),session},{headers:{'Cache-Control':'no-store','X-FundFlow-Storage':'local-file'}})}
+    const {session,permissions}=await access(request);
+    if(useLocalStore(request)){const raw=await readLocalStore();const scoped=scopeRows({...raw,collections:effectiveCollections(raw.collections,raw.receipt_corrections)},session);return Response.json({...permittedSnapshot(snapshot(scoped.users,scoped.loans,scoped.collections,scoped.audit_logs),permissions,session.role),session},{headers:{'Cache-Control':'no-store','X-FundFlow-Storage':'local-file'}})}
     const db=getSupabaseAdmin();
-    const [ur,lr,cr]=await Promise.all([db.from('users').select('*').order('created_at',{ascending:true}),db.from('loans').select('*').order('given_date',{ascending:false}),db.from('collections').select('*').order('collected_at',{ascending:false})]);
+    const [ur,lr,cr]=await Promise.all([db.from('users').select('*').order('created_at',{ascending:true}),db.from('loans').select('*').order('given_date',{ascending:false}),db.from('collection_ledger').select('*').order('collected_at',{ascending:false})]);
     ok(ur.error);ok(lr.error);ok(cr.error);
     const ar=session.role==='admin'?await db.from('audit_logs').select('*').order('created_at',{ascending:false}).limit(2000):{data:[],error:null};ok(ar.error);
-    const scoped=scopeRows({users:(ur.data||[]) as StoredUser[],loans:(lr.data||[]) as StoredLoan[],collections:(cr.data||[]) as StoredCollection[],audit_logs:(ar.data||[]) as StoredAuditLog[]},session);
-    return Response.json({...snapshot(scoped.users,scoped.loans,scoped.collections,scoped.audit_logs),session},{headers:{'Cache-Control':'no-store','X-FundFlow-Storage':'supabase'}});
+    const scoped=scopeRows({users:(ur.data||[]) as StoredUser[],loans:(lr.data||[]) as StoredLoan[],collections:(cr.data||[]).map(r=>({...r,original_amount:r.amount,amount:r.effective_amount})) as StoredCollection[],audit_logs:(ar.data||[]) as StoredAuditLog[]},session);
+    return Response.json({...permittedSnapshot(snapshot(scoped.users,scoped.loans,scoped.collections,scoped.audit_logs),permissions,session.role),session},{headers:{'Cache-Control':'no-store','X-FundFlow-Storage':'supabase'}});
   }catch(error){return fail(error)}
 }
 
 export async function POST(request:Request){
   try{
-    const session=requireSession(request),body=await request.json() as Record<string,unknown>,action=String(body.action||'');
+    const {session,permissions}=await access(request);const body=await request.json() as Record<string,unknown>,action=String(body.action||'');
     if(action==='create_customer')body._entity_id='customer-'+crypto.randomUUID();else if(action==='create_loan')body._entity_id='LN-'+crypto.randomUUID().slice(0,8).toUpperCase();else if(action==='create_collection')body._entity_id='RC-'+crypto.randomUUID().slice(0,8).toUpperCase();else if(action==='create_agent')body._entity_id='agent-'+crypto.randomUUID();
     const adminActions=new Set(['create_customer','update_customer','delete_customers','assign_customer','create_loan','update_loan','foreclose_loan','reopen_loan','delete_agent','create_agent','update_agent']);
-    if(adminActions.has(action))requireAdmin(session);
+    if(actionPermission[action])requirePermission(permissions,actionPermission[action]);else if(adminActions.has(action)||action==='update_collection')requireAdmin(session);
     if(!adminActions.has(action)&&!['create_collection','update_collection'].includes(action))throw new AuthError('This role cannot perform that action',403);
     if(session.role==='customer')throw new AuthError('Customer accounts are read-only',403);
+    if(action==='update_collection')throw new ApiError('Use receipt corrections with a reason. Original receipts cannot be overwritten.');
     if(action==='update_loan'&&body.repayment_frequency!==undefined&&!['daily','weekly','monthly','yearly'].includes(String(body.repayment_frequency)))throw new ApiError('Invalid return basis');
+    if(['create_customer','update_customer'].includes(action)&&(!String(body.occupation||'').trim()||String(body.occupation).trim().length>120))throw new ApiError('Customer occupation is required (maximum 120 characters).');
+    if(['create_loan','update_loan'].includes(action)){
+      let start=body.given_date;
+      if(action==='update_loan'){
+        if(useLocalStore(request)){start=(await readLocalStore()).loans.find(l=>l.id===String(body.id))?.given_date}
+        else{const existing=await getSupabaseAdmin().from('loans').select('given_date').eq('id',String(body.id)).single();ok(existing.error);start=existing.data?.given_date}
+      }
+      if(!validDate(start)||!validDate(body.end_date)||!validDate(body.next_due_date)||body.end_date<start||body.next_due_date<start||body.next_due_date>body.end_date)throw new ApiError('Valid start, due and end dates are required. Due date must be between start and end dates.');
+    }
+    if(action==='create_collection'){
+      if(session.role==='agent'&&!validSignature(body.customer_signature))throw new ApiError('Customer signature is required for agent collections.');
+      if(body.customer_signature!=null&&!validSignature(body.customer_signature))throw new ApiError('Invalid customer signature. Please sign again.');
+      body.agent_id=session.id;
+    }
+    if(action==='update_collection'&&!useLocalStore(request)){
+      const signed=await getSupabaseAdmin().from('collections').select('customer_signature').eq('id',String(body.id)).single();ok(signed.error);
+      if(signed.data?.customer_signature)throw new ApiError('Signed receipts cannot be edited.');
+    }
     if(useLocalStore(request)){await localAction(body,session);return Response.json({ok:true,storage:'local-file',deleted_ids:body.deleted_ids,blocked_ids:body.blocked_ids})}
     const db=getSupabaseAdmin(),now=Math.floor(Date.now()/1000);
     if(action==='delete_customers'){
@@ -156,14 +182,19 @@ export async function POST(request:Request){
       if(result.error)throw new ApiError(result.error.message);
       return Response.json({ok:true,storage:'supabase'});
     }
-    if(action==='create_customer'){if(!String(body.name||'').trim()||!String(body.phone||'').trim())throw new ApiError('Name and mobile number are required');const r=await db.from('users').insert({id:String(body._entity_id),name:String(body.name).trim(),phone:String(body.phone).trim(),email:String(body.email||'')||null,role:'customer',assigned_agent_id:String(body.agent_id||'')||null,created_at:now,username:null,password_hash:null});ok(r.error)}
-    else if(action==='update_customer'){const changes:Record<string,unknown>={name:String(body.name||''),phone:String(body.phone||''),email:String(body.email||'')||null};const r=await db.from('users').update(changes).eq('id',String(body.id)).eq('role','customer');ok(r.error)}
+    if(action==='create_customer'){if(!String(body.name||'').trim()||!String(body.phone||'').trim())throw new ApiError('Name and mobile number are required');const r=await db.from('users').insert({id:String(body._entity_id),name:String(body.name).trim(),phone:String(body.phone).trim(),email:String(body.email||'')||null,role:'customer',occupation:String(body.occupation).trim(),assigned_agent_id:String(body.agent_id||'')||null,created_at:now,username:null,password_hash:null});ok(r.error)}
+    else if(action==='update_customer'){const changes:Record<string,unknown>={occupation:String(body.occupation).trim(),name:String(body.name||''),phone:String(body.phone||''),email:String(body.email||'')||null};const r=await db.from('users').update(changes).eq('id',String(body.id)).eq('role','customer');ok(r.error)}
     else if(action==='assign_customer'){if(body.agent_id){const agent=await db.from('users').select('id').eq('id',String(body.agent_id)).eq('role','agent').maybeSingle();ok(agent.error);if(!agent.data)throw new ApiError('Select an active collection agent');}const r=await db.from('users').update({assigned_agent_id:String(body.agent_id||'')||null}).eq('id',String(body.customer_id)).eq('role','customer');ok(r.error)}
-    else if(action==='create_loan'){const principal=Number(body.principal);if(!String(body.customer_id||'')||!Number.isFinite(principal)||principal<=0)return Response.json({error:'Customer and valid principal are required'},{status:400});const r=await db.from('loans').insert({id:String(body._entity_id),customer_id:String(body.customer_id),principal,balance:principal,interest_type:String(body.interest_type||'fixed'),interest_rate:Number(body.interest_rate||0),repayment_frequency:String(body.repayment_frequency||'monthly'),given_date:String(body.given_date),next_due_date:String(body.next_due_date),security_type:String(body.security_type||'asset'),security_file_key:String(body.security_file_key||'')||null,remarks:String(body.remarks||'')||null,status:'active'});ok(r.error)}
-    else if(action==='create_collection'){const amount=Number(body.amount),loanId=String(body.loan_id||'');if(!loanId||!Number.isFinite(amount)||amount<=0)return Response.json({error:'Loan and valid collection amount are required'},{status:400});const loan=await db.from('loans').select('balance,status').eq('id',loanId).single();ok(loan.error);if(!loan.data)return Response.json({error:'Loan not found'},{status:404});if(session.role==='agent'){const owner=await db.from('users').select('assigned_agent_id').eq('id',String((await db.from('loans').select('customer_id').eq('id',loanId).single()).data?.customer_id||'')).single();ok(owner.error);if(owner.data?.assigned_agent_id!==session.id)throw new AuthError('This customer is not assigned to you',403)}if(amount>n(loan.data.balance))return Response.json({error:'Collection cannot exceed the outstanding balance'},{status:400});const receipt=await db.from('collections').insert({id:String(body._entity_id),loan_id:loanId,agent_id:session.role==='agent'?session.id:String(body.agent_id||'agent-deepak'),amount,method:String(body.method||'Cash'),proof_file_key:String(body.proof_file_key||'')||null,remarks:String(body.remarks||'')||null,collected_at:now});ok(receipt.error);const balance=n(loan.data.balance)-amount,update=await db.from('loans').update({balance,status:balance<=0?'closed':loan.data.status}).eq('id',loanId);ok(update.error)}
+    else if(action==='create_loan'){const principal=Number(body.principal);if(!String(body.customer_id||'')||!Number.isFinite(principal)||principal<=0)return Response.json({error:'Customer and valid principal are required'},{status:400});const r=await db.from('loans').insert({id:String(body._entity_id),customer_id:String(body.customer_id),principal,balance:principal,interest_type:String(body.interest_type||'fixed'),interest_rate:Number(body.interest_rate||0),repayment_frequency:String(body.repayment_frequency||'monthly'),given_date:String(body.given_date),end_date:String(body.end_date),next_due_date:String(body.next_due_date),security_type:String(body.security_type||'asset'),security_file_key:String(body.security_file_key||'')||null,remarks:String(body.remarks||'')||null,status:'active'});ok(r.error)}
+    else if(action==='create_collection'){
+      const amount=Number(body.amount);
+      if(!Number.isSafeInteger(amount)||amount<=0)throw new ApiError('Enter a positive whole-rupee amount');
+      const result=await db.rpc('rmv_record_collection',{p_actor:session.id,p_role:session.role,p_receipt:{id:String(body._entity_id),loan_id:String(body.loan_id||''),amount,method:String(body.method||'Cash'),proof_file_key:String(body.proof_file_key||''),remarks:String(body.remarks||''),collected_at:now,customer_signature:validSignature(body.customer_signature)?body.customer_signature:null,collected_by_name:session.name},p_event:createAuditLog(session,'create_collection',body,now)});
+      ok(result.error);return Response.json({ok:true});
+    }
     else if(action==='foreclose_loan'){const id=String(body.id||''),loan=await db.from('loans').select('balance,status').eq('id',id).single();ok(loan.error);if(!loan.data)throw new ApiError('Loan not found',404);if(loan.data.status==='closed'||loan.data.status==='foreclosed')throw new ApiError('Only an open loan can be foreclosed');const originalBalance=n(loan.data.balance),amount=Number(body.amount),remarks=String(body.remarks||'').trim();if(!Number.isFinite(amount)||!Number.isInteger(amount)||amount<0||amount>originalBalance)throw new ApiError('Settlement amount must be a whole-rupee value between zero and the outstanding balance');if(!remarks)throw new ApiError('Foreclosure remarks are required');const result=await db.from('loans').update({balance:0,status:'foreclosed',foreclosed_at:now,foreclosure_amount:amount,foreclosure_waived:originalBalance-amount,foreclosure_proof_file_key:String(body.proof_file_key||'')||null,foreclosure_remarks:remarks,foreclosed_by:session.name,reopened_at:null,reopen_reason:null,reopened_by:null}).eq('id',id);ok(result.error)}
     else if(action==='reopen_loan'){const id=String(body.id||''),loan=await db.from('loans').select('status,foreclosure_amount,foreclosure_waived,next_due_date').eq('id',id).single();ok(loan.error);if(!loan.data)throw new ApiError('Loan not found',404);if(loan.data.status!=='foreclosed')throw new ApiError('Only a foreclosed loan can be reopened');const reason=String(body.reason||'').trim();if(!reason)throw new ApiError('A reopen reason is required');const restored=n(loan.data.foreclosure_amount)+n(loan.data.foreclosure_waived);body.restored_balance=restored;const status=String(loan.data.next_due_date)<new Date().toISOString().slice(0,10)?'overdue':'active';const result=await db.from('loans').update({balance:restored,status,reopened_at:now,reopen_reason:reason,reopened_by:session.name}).eq('id',id);ok(result.error)}
-    else if(action==='update_loan'){const r=await db.from('loans').update({interest_rate:Number(body.interest_rate),next_due_date:String(body.next_due_date),remarks:String(body.remarks||'')||null,...(body.repayment_frequency!==undefined?{repayment_frequency:String(body.repayment_frequency)}:{})}).eq('id',String(body.id));ok(r.error)}
+    else if(action==='update_loan'){const r=await db.from('loans').update({end_date:String(body.end_date),interest_rate:Number(body.interest_rate),next_due_date:String(body.next_due_date),remarks:String(body.remarks||'')||null,...(body.repayment_frequency!==undefined?{repayment_frequency:String(body.repayment_frequency)}:{})}).eq('id',String(body.id));ok(r.error)}
     else if(action==='update_collection'){const id=String(body.id),amount=Number(String(body.amount).replace(/[^0-9.]/g,''));if(!Number.isFinite(amount)||amount<=0)return Response.json({error:'Valid receipt and amount are required'},{status:400});const existing=await db.from('collections').select('amount,loan_id,agent_id').eq('id',id).single();ok(existing.error);if(!existing.data)return Response.json({error:'Receipt not found'},{status:404});if(session.role==='agent'&&existing.data.agent_id!==session.id)throw new AuthError('You can edit only your own collections',403);const loan=await db.from('loans').select('balance,status').eq('id',existing.data.loan_id).single();ok(loan.error);if(!loan.data)return Response.json({error:'Loan not found'},{status:404});if(loan.data.status==='foreclosed')throw new ApiError('Reopen the loan before editing its collections');body.loan_id=existing.data.loan_id;const balance=n(loan.data.balance)+n(existing.data.amount)-amount;if(balance<0)return Response.json({error:'Collection cannot exceed the outstanding balance'},{status:400});const receipt=await db.from('collections').update({amount,method:String(body.method||'Cash'),remarks:String(body.remarks||'')||null}).eq('id',id);ok(receipt.error);const status=balance<=0?'closed':loan.data.status==='closed'?'active':loan.data.status,update=await db.from('loans').update({balance,status}).eq('id',existing.data.loan_id);ok(update.error)}
     else if(action==='delete_agent'){const id=String(body.id||''),agent=await db.from('users').select('id').eq('id',id).eq('role','agent').maybeSingle();ok(agent.error);if(!agent.data)return Response.json({error:'Active agent not found'},{status:404});const unassign=await db.from('users').update({assigned_agent_id:null}).eq('assigned_agent_id',id);ok(unassign.error);const archive=await db.from('users').update({role:'archived_agent'}).eq('id',id).eq('role','agent');ok(archive.error)}
     else if(action==='create_agent'){const username=String(body.username||'').trim().toLowerCase(),password=String(body.password||'');if(!username||password.length<8)throw new ApiError('Username and an 8-character password are required');const r=await db.from('users').insert({id:String(body._entity_id),name:String(body.name||''),phone:String(body.phone||''),email:String(body.email||'')||null,role:'agent',created_at:now,username,password_hash:hashPassword(password)});ok(r.error)}

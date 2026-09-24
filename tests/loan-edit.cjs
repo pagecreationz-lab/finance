@@ -11,7 +11,7 @@ const request=body=>new Request('http://localhost/api/auth/login',{method:'POST'
 (async()=>{
  const admin={id:'super-admin',name:'Admin',role:'admin'},agent={id:'agent-deepak',name:'Agent',role:'agent'};
  async function call(body,actor=admin){const r=request(body);r.headers.set('cookie',auth.createSessionCookie(actor,new Request('http://localhost')).split(';')[0]);return route.POST(r)}
- const edit={action:'update_loan',id:'LN-2048',interest_rate:16,next_due_date:'2026-10-01',remarks:'Test',repayment_frequency:'daily'};
+ const edit={action:'update_loan',id:'LN-2048',interest_rate:16,next_due_date:'2026-10-01',end_date:'2027-05-09',remarks:'Test',repayment_frequency:'daily'};
  assert.equal((await call(edit,agent)).status,403);
  assert.equal((await call({...edit,repayment_frequency:'invalid'})).status,400);
  assert.equal((await call(edit)).status,200);

@@ -1,0 +1,45 @@
+// Isolated login regression tests. No production database or network access.
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),os=require('node:os'),Module=require('node:module'),ts=require('typescript');
+const root=path.resolve(__dirname,'..'),temp=fs.mkdtempSync(path.join(os.tmpdir(),'fundflow-login-test-'));
+process.env.FUNDFLOW_LOCAL_DATA_PATH=path.join(temp,'data.json');process.env.FUNDFLOW_SESSION_SECRET='test-only-session-secret';process.env.FUNDFLOW_ADMIN_USER=' admin ';process.env.FUNDFLOW_ADMIN_PASSWORD='test-only-password';process.env.NODE_ENV='production';
+for(const key of ['NEXT_PUBLIC_SUPABASE_URL','SUPABASE_SECRET_KEY','SUPABASE_SERVICE_ROLE_KEY'])delete process.env[key];
+const resolve=Module._resolveFilename;Module._resolveFilename=function(name,...args){return resolve.call(this,name.startsWith('@/')?path.join(root,name.slice(2)):name,...args)};
+Module._extensions['.ts']=function(mod,file){mod._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file)};
+global.fetch=()=>{throw new Error('Network forbidden in test')};
+const route=require('../app/api/data/route.ts'),auth=require('../lib/auth.ts'),store=require('../lib/local-data-store.ts'),db=require('../lib/supabase-admin.ts');
+const request=body=>new Request('http://localhost/api/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+(async()=>{
+ const admin={id:'super-admin',name:'Admin',role:'admin'},agent={id:'agent-deepak',name:'Agent',role:'agent'};
+ async function call(body,actor=admin){const r=request(body);r.headers.set('cookie',auth.createSessionCookie(actor,new Request('http://localhost')).split(';')[0]);return route.POST(r)}
+ const customer={action:'create_customer',name:'Test',phone:'1234567890'};
+ assert.equal((await call(customer)).status,400);
+ assert.equal((await call({...customer,occupation:'Shopkeeper'})).status,200);
+ let data=await store.readLocalStore(),created=data.users.find(u=>u.name==='Test');
+ assert.equal(created.occupation,'Shopkeeper');
+ assert.equal((await call({action:'update_customer',id:created.id,name:'Test',phone:'1234567890'})).status,400);
+ const loan={action:'create_loan',customer_id:created.id,principal:100,given_date:'2026-09-01',next_due_date:'2026-09-08'};
+ assert.equal((await call(loan)).status,400);
+ assert.equal((await call({...loan,end_date:'2026-08-30'})).status,400);
+ assert.equal((await call({...loan,end_date:'2026-12-31'})).status,200);
+ const signature=[[[.1,.1],[.2,.2],[.3,.1],[.4,.2],[.5,.1]]];
+ const payment={action:'create_collection',loan_id:'LN-2048',amount:10,method:'Cash'};
+ assert.equal((await call(payment,agent)).status,400);
+ assert.equal((await call({...payment,customer_signature:[]},agent)).status,400);
+ const before=(await store.readLocalStore()).loans.find(l=>l.id==='LN-2048').balance;
+ assert.equal((await call({...payment,customer_signature:signature},agent)).status,200);
+ data=await store.readLocalStore();const receipt=data.collections[0];
+ assert.deepEqual(receipt.customer_signature,signature);assert.equal(receipt.agent_id,agent.id);assert.ok(receipt.signature_at);
+ assert.equal(data.loans.find(l=>l.id==='LN-2048').balance,before-10);
+ assert.equal((await call({action:'update_collection',id:receipt.id,amount:20,method:'Cash'})).status,400);
+ assert.equal((await call({...payment,loan_id:'LN-2047',customer_signature:signature},agent)).status,403);
+ assert.equal((await call(payment)).status,200);
+ data=await store.readLocalStore();assert.equal(data.collections[0].agent_id,null);assert.equal(data.collections[0].collected_by_name,'Admin');
+ const unsigned=data.collections[0];
+ assert.equal((await call({action:'update_collection',id:unsigned.id,amount:10,method:'Cash'},agent)).status,403);
+ assert.equal((await call({action:'update_collection',id:unsigned.id,amount:10,method:'Cash'},admin)).status,400);
+ assert.ok(data.audit_logs.some(l=>l.action==='create_collection'&&l.metadata.signature_attached===true));
+ const requestAgent=new Request('http://localhost/api/data',{headers:{cookie:auth.createSessionCookie(agent,new Request('http://localhost')).split(';')[0]}});
+ const snapshot=await(await route.GET(requestAgent)).json();
+ assert.ok(snapshot.collections.some(r=>r.id===receipt.id&&r.customer_signature));
+ assert.ok(!snapshot.loans.some(l=>l.id==='LN-2047'));
+ console.log('PASS: mandatory occupation/dates/signatures, persistence, receipt immutability, correct collector, balance/audit update and role scoping.');})().catch(error=>{console.error(error);process.exitCode=1}).finally(()=>{if(path.dirname(path.resolve(temp))===path.resolve(os.tmpdir())&&path.basename(temp).startsWith('fundflow-login-test-'))fs.rmSync(temp,{recursive:true,force:true})});

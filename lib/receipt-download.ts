@@ -1,0 +1,18 @@
+import {validSignature} from './collection-records';
+type Receipt = {original_amount?:number;correction_id?:string;correction_reason?:string;correction_approved_by?:string;id:string;loan_id:string;customer_name:string;amount:number;method:string;collected_at:number;agent_name?:string;collected_by_name?:string;remarks?:string;customer_signature?:unknown;signature_at?:number};
+export function collectionDate(value:number) {
+  const date=new Date(Number(value)*1000);
+  return Number.isFinite(date.getTime())?date.toLocaleString('en-IN',{timeZone:'Asia/Kolkata',dateStyle:'medium',timeStyle:'short'})+' IST':'Not recorded';
+}
+const escape=(value:unknown)=>String(value??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
+export function receiptHtml(receipt:Receipt) {
+  const rows=[['Receipt number',receipt.id],['Customer',receipt.customer_name],['Loan number',receipt.loan_id],['Collected date & time',collectionDate(receipt.collected_at)],['Amount received','₹'+Number(receipt.amount).toLocaleString('en-IN')],['Payment method',receipt.method],['Collected by',receipt.collected_by_name||receipt.agent_name||'Not recorded'],['Remarks',receipt.remarks||'—']];
+  if(receipt.correction_id)rows.push(['Original payment amount','₹'+Number(receipt.original_amount).toLocaleString('en-IN')],['Correction reference',receipt.correction_id],['Correction reason',receipt.correction_reason||'—'],['Approved by',receipt.correction_approved_by||'—'],['Signature notice','The signature belongs to the original payment, not the corrected amount.']);
+  const signature=validSignature(receipt.customer_signature)?'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 200" aria-label="Customer signature">'+receipt.customer_signature.map(stroke=>'<polyline points="'+stroke.map(p=>`${p[0]*600},${p[1]*200}`).join(' ')+'" fill="none" stroke="#153d30" stroke-width="2" stroke-linecap="round"/>').join('')+'</svg>':'<p>Signature not captured for this receipt.</p>';
+  return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RMV Finance — Receipt '+escape(receipt.id)+'</title><style>body{font:16px system-ui,sans-serif;color:#153d30;margin:0;padding:32px}main{max-width:700px;margin:auto}h1{margin-bottom:4px}h2{font-size:20px}table{width:100%;border-collapse:collapse;margin:24px 0}th,td{text-align:left;padding:12px;border-bottom:1px solid #dce5e0;overflow-wrap:anywhere}th{width:42%;font-weight:500;color:#576c63}svg{width:100%;max-height:200px;border:1px solid #dce5e0}p{line-height:1.6}footer{margin-top:24px;font-size:12px;color:#576c63}@media print{body{padding:0}main{max-width:none}tr,svg{break-inside:avoid}.help{display:none}}</style></head><body><main><h1>RMV Finance</h1><h2>Collection receipt</h2><table>'+rows.map(([label,value])=>'<tr><th>'+escape(label)+'</th><td>'+escape(value)+'</td></tr>').join('')+'</table><h2>Customer signature</h2>'+signature+(receipt.signature_at?'<p>Captured: '+escape(collectionDate(receipt.signature_at))+'</p>':'')+'<footer>Receipt for the recorded payment only. This does not certify full loan settlement.</footer><p class="help">To print or save as PDF, use your browser’s Print option.</p></main></body></html>';
+}
+export function downloadReceipt(receipt:Receipt) {
+  const url=URL.createObjectURL(new Blob([receiptHtml(receipt)],{type:'text/html;charset=utf-8'}));
+  const link=document.createElement('a');link.href=url;link.download='RMV-Finance-Receipt-'+String(receipt.id).replace(/[^a-zA-Z0-9_-]/g,'-')+'.html';
+  document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}

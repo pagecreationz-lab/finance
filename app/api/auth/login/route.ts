@@ -71,7 +71,7 @@ export async function POST(request: Request) {
             .from('users')
             .select('id,name,role,password_hash')
             .eq('username', username)
-            .in('role', ['admin', 'agent', 'customer'])
+            .in('role', ['admin', 'manager', 'agent', 'customer'])
             .abortSignal(signal)
             .maybeSingle(),
           db
@@ -115,7 +115,7 @@ export async function POST(request: Request) {
             { error: 'Customer portal login is temporarily paused' },
             { status: 403 },
           );
-        if (['admin', 'agent', 'customer'].includes(user.role))
+        if (['admin', 'manager', 'agent', 'customer'].includes(user.role))
           account = {
             id: user.id,
             name: user.name,

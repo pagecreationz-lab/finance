@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 
-export type AppRole = 'admin'|'agent'|'customer';
+export type AppRole = 'admin'|'manager'|'agent'|'customer';
 export type AppSession = { id:string; name:string; role:AppRole; exp:number };
 export const SESSION_COOKIE = 'fundflow_session';
 
@@ -49,7 +49,7 @@ export function readSession(request:Request):AppSession|null{
     const [payload,signature]=token.split('.');
     if(!payload||!signature||!safeEqual(sign(payload),signature))return null;
     const session=JSON.parse(Buffer.from(payload,'base64url').toString('utf8')) as AppSession;
-    if(!session.id||!['admin','agent','customer'].includes(session.role)||session.exp<=Date.now())return null;
+    if(!session.id||!['admin','manager','agent','customer'].includes(session.role)||session.exp<=Date.now())return null;
     if(session.role==='customer'&&process.env.FUNDFLOW_CUSTOMER_LOGIN_ENABLED!=='true')return null;
     return session;
   }catch{return null}

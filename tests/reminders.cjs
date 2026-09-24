@@ -287,7 +287,7 @@ global.fetch = async (url, options = {}) => {
   await local.mutateLocalStore((data) => {
     data.users.find((row) => row.id === 'agent-deepak').role = 'archived_agent';
   });
-  assert.equal((await route.GET(req(undefined, agent))).status, 403);
+  assert.equal((await route.GET(req(undefined, agent))).status, 401);
   // Separate fresh loans exercise 3-day, 2-day and due-day automation without old claims.
   await local.mutateLocalStore((data) => {
     const sample = data.loans[1];

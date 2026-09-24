@@ -280,3 +280,219 @@ end;
 $$;
 drop trigger if exists immutable_reminder_identity on public.reminder_events;
 create trigger immutable_reminder_identity before update on public.reminder_events for each row execute function public.guard_reminder_event();
+-- Apply to existing installations before deploying the matching application.
+-- Existing rows remain nullable; no occupations, dates or signatures are fabricated.
+begin;
+alter table public.users add column if not exists occupation text;
+alter table public.loans add column if not exists end_date date;
+alter table public.collections add column if not exists customer_signature jsonb;
+alter table public.collections add column if not exists signature_at bigint;
+
+create or replace function public.rmv_protect_signed_receipt() returns trigger
+language plpgsql set search_path = public as $$
+begin
+  if old.customer_signature is not null then
+    raise exception 'Signed receipts cannot be edited or deleted';
+  end if;
+  if tg_op = 'DELETE' then return old; end if;
+  return new;
+end;
+$$;
+drop trigger if exists rmv_signed_receipt_guard on public.collections;
+create trigger rmv_signed_receipt_guard before update or delete on public.collections
+for each row execute function public.rmv_protect_signed_receipt();
+alter table public.collections add column if not exists collected_by_name text;
+alter table public.collections alter column agent_id drop not null;
+create or replace function public.rmv_record_collection(p_receipt jsonb, p_actor text, p_role text, p_event jsonb)
+returns void language plpgsql security definer set search_path = public as $$
+declare l public.loans; amount_received bigint; sig jsonb;
+begin
+  if p_role not in ('admin','agent') then raise exception 'Forbidden'; end if;
+  select * into l from public.loans where id=p_receipt->>'loan_id' for update;
+  if not found then raise exception 'Loan not found'; end if;
+  if l.status in ('closed','foreclosed') then raise exception 'Loan is closed'; end if;
+  if p_role='agent' and not exists(select 1 from public.users where id=l.customer_id and assigned_agent_id=p_actor) then
+    raise exception 'Customer is not assigned to this agent';
+  end if;
+  amount_received=(p_receipt->>'amount')::bigint;
+  if amount_received is null or amount_received<=0 or amount_received>l.balance then raise exception 'Invalid collection amount'; end if;
+  sig=nullif(p_receipt->'customer_signature','null'::jsonb);
+  if p_role='agent' and (sig is null or jsonb_typeof(sig)<>'array' or jsonb_array_length(sig)=0) then raise exception 'Customer signature required'; end if;
+  insert into public.collections(id,loan_id,agent_id,amount,method,proof_file_key,remarks,collected_at,customer_signature,signature_at,collected_by_name)
+  values(p_receipt->>'id',l.id,case when p_role='agent' then p_actor else null end,amount_received,p_receipt->>'method',nullif(p_receipt->>'proof_file_key',''),nullif(p_receipt->>'remarks',''),(p_receipt->>'collected_at')::bigint,sig,case when sig is not null then (p_receipt->>'collected_at')::bigint else null end,p_receipt->>'collected_by_name');
+  update public.loans set balance=balance-amount_received,status=case when balance-amount_received=0 then 'closed' else status end where id=l.id;
+  insert into public.audit_logs select * from jsonb_populate_record(null::public.audit_logs,p_event);
+end;
+$$;
+revoke all on function public.rmv_record_collection(jsonb,text,text,jsonb) from public,anon,authenticated;
+grant execute on function public.rmv_record_collection(jsonb,text,text,jsonb) to service_role;
+commit;
+notify pgrst, 'reload schema';
+
+-- Prerequisites: schema, authentication, audit/reopen, customer deletion,
+-- reminders, and customer-loan-signature migrations already applied.
+begin;
+create table if not exists public.role_permissions (
+ id integer primary key check (id=1), policy jsonb not null
+);
+alter table public.role_permissions enable row level security;
+revoke all on public.role_permissions from anon,authenticated;
+grant all on public.role_permissions to service_role;
+insert into public.role_permissions(id,policy) values(1,
+'{"manager":["customers","loans","collections","agents","reports","reminders","create_customer","create_loan","create_agent","assign_customer"],"agent":["customers","loans","collections","reports","reminders","create_collection"]}'::jsonb)
+on conflict(id) do nothing;
+
+create or replace function public.rmv_save_permissions(p_policy jsonb,p_event jsonb)
+returns void language plpgsql security definer set search_path=public as $$
+begin
+ if p_event->>'actor_role' is distinct from 'admin' then raise exception 'Super admin required'; end if;
+ update public.role_permissions set policy=p_policy where id=1;
+ insert into public.audit_logs select * from jsonb_populate_record(null::public.audit_logs,p_event);
+end;$$;
+revoke all on function public.rmv_save_permissions(jsonb,jsonb) from public,anon,authenticated;
+grant execute on function public.rmv_save_permissions(jsonb,jsonb) to service_role;
+
+create or replace function public.rmv_manage_manager(p_user jsonb,p_event jsonb,p_create boolean)
+returns void language plpgsql security definer set search_path=public as $$
+begin
+ if p_event->>'actor_role' is distinct from 'admin' then raise exception 'Super admin required'; end if;
+ if p_create then
+   insert into public.users(id,name,phone,username,password_hash,role,created_at)
+   values(p_user->>'id',p_user->>'name',p_user->>'phone',p_user->>'username',p_user->>'password_hash','manager',(p_user->>'created_at')::bigint);
+ else
+   if p_user->>'role' not in ('manager','archived_manager') then raise exception 'Invalid role'; end if;
+   update public.users set role=p_user->>'role' where id=p_user->>'id' and role in ('manager','archived_manager');
+   if not found then raise exception 'Manager not found'; end if;
+ end if;
+ insert into public.audit_logs select * from jsonb_populate_record(null::public.audit_logs,p_event);
+end;$$;
+revoke all on function public.rmv_manage_manager(jsonb,jsonb,boolean) from public,anon,authenticated;
+grant execute on function public.rmv_manage_manager(jsonb,jsonb,boolean) to service_role;
+
+-- Extend the existing transactional collection function to manager accounts.
+-- Access to this function remains server/service-role only; the API checks grants.
+do $$
+declare definition text;
+begin
+ select pg_get_functiondef('public.rmv_record_collection(jsonb,text,text,jsonb)'::regprocedure) into definition;
+ definition=replace(definition,'''admin'',''agent''','''admin'',''agent'',''manager''');
+ execute definition;
+end;$$;
+commit;
+notify pgrst,'reload schema';
+
+-- Apply after rbac-migration.sql. Original signed receipts are never updated.
+begin;
+create sequence if not exists public.receipt_correction_sequence;
+create table if not exists public.receipt_corrections (
+ id text primary key, receipt_id text not null references public.collections(id), loan_id text not null references public.loans(id),
+ before_amount bigint not null check(before_amount>=0), after_amount bigint not null check(after_amount>=0), base_revision text,
+ reason text not null check(length(trim(reason)) between 10 and 1000), requested_by text not null, requested_name text not null,
+ created_at bigint not null, status text not null check(status in ('pending','approved','rejected')),
+ reviewed_by text,reviewed_name text,review_reason text,reviewed_at bigint,applied_sequence bigint unique
+);
+create index if not exists receipt_corrections_receipt_idx on public.receipt_corrections(receipt_id,applied_sequence desc);
+alter table public.receipt_corrections enable row level security;
+revoke all on public.receipt_corrections from public,anon,authenticated,service_role;
+grant select on public.receipt_corrections to service_role;
+
+create or replace function public.rmv_guard_correction() returns trigger language plpgsql set search_path=public as $$
+begin
+ if tg_op='DELETE' then raise exception 'Correction history cannot be deleted'; end if;
+ if old.status<>'pending' or new.status not in ('approved','rejected') or
+ (to_jsonb(new)-array['status','reviewed_by','reviewed_name','review_reason','reviewed_at','applied_sequence']) is distinct from
+ (to_jsonb(old)-array['status','reviewed_by','reviewed_name','review_reason','reviewed_at','applied_sequence']) then
+ raise exception 'Correction requests and decisions are immutable'; end if;
+ return new;
+end;$$;
+drop trigger if exists rmv_correction_guard on public.receipt_corrections;
+create trigger rmv_correction_guard before update or delete on public.receipt_corrections for each row execute function public.rmv_guard_correction();
+
+create or replace view public.collection_ledger as
+select c.*,coalesce(x.after_amount,c.amount) as effective_amount,x.id as correction_id,x.reason as correction_reason,x.reviewed_name as correction_approved_by
+from public.collections c left join lateral(
+ select r.* from public.receipt_corrections r where r.receipt_id=c.id and r.status='approved' order by applied_sequence desc limit 1
+) x on true;
+revoke all on public.collection_ledger from public,anon,authenticated;
+grant select on public.collection_ledger to service_role;
+
+create or replace function public.rmv_correct_receipt(p_body jsonb,p_actor text,p_name text,p_role text)
+returns jsonb language plpgsql security definer set search_path=public as $$
+declare c public.receipt_corrections; r public.collections; l public.loans;
+ revision text; current_amount bigint; balance_after bigint; stamp bigint=extract(epoch from now())::bigint;
+ action text=p_body->>'action'; reason_text text=trim(p_body->>'reason');
+begin
+ if p_role not in ('admin','manager') or action not in ('request','approve','reject') then raise exception 'Forbidden'; end if;
+ if action<>'request' and p_role<>'admin' then raise exception 'Super admin approval required'; end if;
+ if reason_text is null or length(reason_text) not between 10 and 1000 then raise exception 'A valid reason is required'; end if;
+ if action='request' then
+   select * into c from public.receipt_corrections where id=p_body->>'id';
+   if found then
+     if c.requested_by<>p_actor or c.receipt_id<>p_body->>'receipt_id' or c.after_amount<>(p_body->>'amount')::bigint or c.reason<>reason_text then raise exception 'Request ID already used'; end if;
+     return to_jsonb(c);
+   end if;
+   select * into r from public.collections where id=p_body->>'receipt_id' for update;
+   if not found then raise exception 'Receipt not found'; end if;
+ else
+   select * into c from public.receipt_corrections where id=p_body->>'id' for update;
+   if not found or c.status<>'pending' then raise exception 'Request not found or already decided'; end if;
+   select * into r from public.collections where id=c.receipt_id for update;
+ end if;
+ select * into l from public.loans where id=r.loan_id for update;
+ if not found then raise exception 'Loan not found'; end if;
+ select id,after_amount into revision,current_amount from public.receipt_corrections where receipt_id=r.id and status='approved' order by applied_sequence desc limit 1;
+ current_amount=coalesce(current_amount,r.amount);
+ if action='request' then
+   if l.status='foreclosed' then raise exception 'Reopen the foreclosed loan before correcting receipts'; end if;
+   if nullif(p_body->>'base_revision','') is distinct from revision or (p_body->>'before_amount')::bigint<>current_amount then raise exception 'Receipt changed. Refresh before submitting.'; end if;
+   if (p_body->>'amount')::numeric<>trunc((p_body->>'amount')::numeric) or (p_body->>'amount')::bigint<0 or (p_body->>'amount')::bigint=current_amount then raise exception 'Invalid corrected amount'; end if;
+   insert into public.receipt_corrections(id,receipt_id,loan_id,before_amount,after_amount,base_revision,reason,requested_by,requested_name,created_at,status)
+   values(p_body->>'id',r.id,l.id,current_amount,(p_body->>'amount')::bigint,revision,reason_text,p_actor,p_name,stamp,'pending') returning * into c;
+   insert into public.audit_logs(id,actor_id,actor_name,actor_role,action,entity_type,entity_id,summary,metadata,created_at)
+   values('LOG-'||gen_random_uuid(),p_actor,p_name,p_role,'receipt_correction_requested','collection',r.id,'Requested receipt correction',to_jsonb(c),stamp);
+   if p_role='manager' then return to_jsonb(c); end if;
+ end if;
+ if action='reject' then
+   update public.receipt_corrections set status='rejected',reviewed_by=p_actor,reviewed_name=p_name,review_reason=reason_text,reviewed_at=stamp where id=c.id returning * into c;
+ else
+   if l.status='foreclosed' then raise exception 'Reopen the foreclosed loan before applying a correction'; end if;
+   if revision is distinct from c.base_revision or current_amount<>c.before_amount then raise exception 'Stale request. Reject and submit a new correction.'; end if;
+   balance_after=l.balance+c.before_amount-c.after_amount;
+   if balance_after<0 then raise exception 'Correction exceeds outstanding balance'; end if;
+   update public.loans set balance=balance_after,status=case when balance_after=0 then 'closed' when next_due_date<(now() at time zone 'Asia/Kolkata')::date then 'overdue' else 'active' end where id=l.id;
+   if balance_after>0 then update public.users set role='customer' where id=l.customer_id and role='archived_customer'; end if;
+   update public.receipt_corrections set status='approved',reviewed_by=p_actor,reviewed_name=p_name,review_reason=reason_text,reviewed_at=stamp,applied_sequence=nextval('public.receipt_correction_sequence') where id=c.id returning * into c;
+ end if;
+ insert into public.audit_logs(id,actor_id,actor_name,actor_role,action,entity_type,entity_id,summary,metadata,created_at)
+ values('LOG-'||gen_random_uuid(),p_actor,p_name,p_role,'receipt_correction_'||c.status,'collection',r.id,case when c.status='approved' then 'Approved receipt correction' else 'Rejected receipt correction' end,to_jsonb(c)||jsonb_build_object('balance_after',balance_after),stamp);
+ return to_jsonb(c);
+end;$$;
+revoke all on function public.rmv_correct_receipt(jsonb,text,text,text) from public,anon,authenticated;
+grant execute on function public.rmv_correct_receipt(jsonb,text,text,text) to service_role;
+
+-- Preserve existing restrictions; enable requests only for managers already allowed collections.
+update public.role_permissions set policy=jsonb_set(policy,'{manager}',(policy->'manager')||'["request_correction"]'::jsonb)
+where (policy->'manager') ? 'collections' and not (policy->'manager') ? 'request_correction';
+commit;
+notify pgrst,'reload schema';
+
+-- Apply after rbac-migration.sql. Deletes retain the user ID for financial history.
+begin;
+create or replace function public.rmv_edit_manager(p_user jsonb,p_event jsonb,p_delete boolean)
+returns void language plpgsql security definer set search_path=public as $$
+begin
+ if p_event->>'actor_role' is distinct from 'admin' then raise exception 'Super admin required'; end if;
+ perform 1 from public.users where id=p_user->>'id' and role in ('manager','archived_manager') for update;
+ if not found then raise exception 'Manager not found'; end if;
+ if p_delete then
+   update public.users set role='deleted_manager',password_hash=null where id=p_user->>'id';
+ else
+   if length(trim(p_user->>'name')) not between 1 and 100 or (p_user->>'username') !~ '^[a-z0-9._-]{3,60}$' then raise exception 'Invalid manager details'; end if;
+   update public.users set name=p_user->>'name',username=p_user->>'username',password_hash=coalesce(p_user->>'password_hash',password_hash) where id=p_user->>'id';
+ end if;
+ insert into public.audit_logs select * from jsonb_populate_record(null::public.audit_logs,p_event);
+end;$$;
+revoke all on function public.rmv_edit_manager(jsonb,jsonb,boolean) from public,anon,authenticated;
+grant execute on function public.rmv_edit_manager(jsonb,jsonb,boolean) to service_role;
+commit;
+notify pgrst,'reload schema';
