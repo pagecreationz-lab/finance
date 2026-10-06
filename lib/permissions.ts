@@ -1,6 +1,6 @@
 export const permissionLabels = {
-  submit_loan:'Submit loans for manager approval',approve_loan:'Approve agent-created loans',
-  submit_customer:'Submit customers for manager approval',approve_customer:'Approve agent-created customers',
+  submit_loan:'Create loans (Admin Manager approval required)',approve_loan:'Approve agent-created loans',
+  submit_customer:'Create customers (Admin Manager approval required)',approve_customer:'Approve agent-created customers',
   request_correction:'Request receipt corrections (Super Admin approval required)',
   customers:'View customers',loans:'View loans',collections:'View collections',agents:'Monitor collection agents',reports:'View/export reports',reminders:'View/send reminders',
   create_customer:'Create customers',create_loan:'Create loans',create_agent:'Create collection agents',assign_customer:'Assign collection agents',
