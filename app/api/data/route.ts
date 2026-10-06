@@ -1,5 +1,6 @@
 import { access, requirePermission, actionPermission } from '@/lib/rbac';
 import { validSignature, validDate } from '@/lib/collection-records';
+import {loanSummary,flatInterest,installmentDates,refreshFlatLoan} from '@/lib/loan-calculation';
 import { getSupabaseAdmin, hasSupabaseConfig } from '@/lib/supabase-admin';
 import { AuthError, hashPassword, requireAdmin, requireSession, type AppSession } from '@/lib/auth';
 import { mutateLocalStore, readLocalStore, type LocalFinanceData, type StoredAuditLog, type StoredCollection, type StoredLoan, type StoredUser } from '@/lib/local-data-store';
@@ -30,7 +31,8 @@ function snapshot(users:StoredUser[], loanRows:StoredLoan[], collectionRows:Stor
   const loans=loanRows.map(loan=>{
     const customer=userById.get(loan.customer_id);
     const receiptPaid=collectionRows.filter(item=>item.loan_id===loan.id).reduce((sum,item)=>sum+n(item.amount),0);
-    return {...loan,customer_name:customer?.name||'Unknown customer',phone:customer?.phone||'',assigned_agent_id:customer?.assigned_agent_id||null,agent_name:customer?.assigned_agent_id?userById.get(customer.assigned_agent_id)?.name||null:null,paid:receiptPaid+(loan.status==='foreclosed'?n(loan.foreclosure_amount):0)};
+    const calculated=loanSummary(loan);
+    return {...loan,...calculated,customer_name:customer?.name||'Unknown customer',phone:customer?.phone||'',assigned_agent_id:customer?.assigned_agent_id||null,agent_name:customer?.assigned_agent_id?userById.get(customer.assigned_agent_id)?.name||null:null,paid:receiptPaid+(loan.status==='foreclosed'?n(loan.foreclosure_amount):0)};
   });
   const collections=collectionRows.map(item=>{
     const loan=loanById.get(item.loan_id),customer=loan?userById.get(loan.customer_id):undefined;
@@ -153,11 +155,19 @@ export async function POST(request:Request){
     if(['create_customer','update_customer'].includes(action)&&(!String(body.occupation||'').trim()||String(body.occupation).trim().length>120))throw new ApiError('Customer occupation is required (maximum 120 characters).');
     if(['create_loan','update_loan'].includes(action)){
       let start=body.given_date;
+      let oldLoan:StoredLoan|undefined;
       if(action==='update_loan'){
-        if(useLocalStore(request)){start=(await readLocalStore()).loans.find(l=>l.id===String(body.id))?.given_date}
-        else{const existing=await getSupabaseAdmin().from('loans').select('given_date').eq('id',String(body.id)).single();ok(existing.error);start=existing.data?.given_date}
+        if(useLocalStore(request)){oldLoan=(await readLocalStore()).loans.find(l=>l.id===String(body.id))}
+        else{const existing=await getSupabaseAdmin().from('loans').select('*').eq('id',String(body.id)).single();ok(existing.error);oldLoan=existing.data as StoredLoan}
+        if(!oldLoan)throw new ApiError('Loan not found',404);start=oldLoan.given_date;
       }
       if(!validDate(start)||!validDate(body.end_date)||!validDate(body.next_due_date)||body.end_date<start||body.next_due_date<start||body.next_due_date>body.end_date)throw new ApiError('Valid start, due and end dates are required. Due date must be between start and end dates.');
+      try{
+        flatInterest(oldLoan?.principal??Number(body.principal),Number(body.interest_rate??0));
+        installmentDates(body.next_due_date,body.end_date,String(body.repayment_frequency||oldLoan?.repayment_frequency||'monthly'));
+        if(action==='create_loan'&&String(body.interest_type||'fixed')!=='fixed')throw new Error('New loans use flat interest on original principal for the entire term.');
+        if(oldLoan)refreshFlatLoan({...oldLoan,interest_rate:Number(body.interest_rate),end_date:body.end_date,next_due_date:body.next_due_date,repayment_frequency:String(body.repayment_frequency||oldLoan.repayment_frequency)},oldLoan);
+      }catch(error){throw new ApiError(error instanceof Error?error.message:'Invalid loan terms')}
     }
     if(action==='create_collection'){
       if(session.role==='agent'&&!validSignature(body.customer_signature))throw new ApiError('Customer signature is required for agent collections.');

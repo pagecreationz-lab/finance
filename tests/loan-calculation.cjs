@@ -1,0 +1,23 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),Module=require('node:module'),ts=require('typescript');
+Module._extensions['.ts']=function(mod,file){mod._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file)};
+const {flatInterest,installmentDates,initializeFlatLoan,loanCalculation,refreshFlatLoan}=require('../lib/loan-calculation.ts');
+const make=()=>({principal:500000,balance:500000,interest_rate:10,interest_type:'fixed',repayment_frequency:'daily',given_date:'2026-10-06',end_date:'2027-10-06',next_due_date:'2026-10-07',status:'active'});
+assert.equal(flatInterest(500000,10),50000);
+assert.equal(flatInterest(5,10),1);
+for(const args of [[0,10],[1.5,10],[500,-1],[500,NaN],[500,0.12345]])assert.throws(()=>flatInterest(...args));
+const loan=initializeFlatLoan(make()),calc=loanCalculation(loan,'2026-10-06');
+assert.equal(loan.balance,550000);assert.equal(calc.total_repayable,550000);assert.equal(calc.installment_count,365);assert.equal(calc.installment_min,1506);assert.equal(calc.installment_max,1507);
+assert.equal(calc.schedule.reduce((s,r)=>s+r.amount,0),550000);initializeFlatLoan(loan);assert.equal(loan.balance,550000);
+let old=structuredClone(loan);loan.balance-=100;refreshFlatLoan(loan,old);assert.equal(loan.next_due_date,'2026-10-07');assert.equal(loanCalculation(loan).next_installment_due,1407);
+old=structuredClone(loan);loan.balance-=1407;refreshFlatLoan(loan,old);assert.equal(loan.next_due_date,'2026-10-08');
+old=structuredClone(loan);loan.balance+=1;refreshFlatLoan(loan,old);assert.equal(loan.next_due_date,'2026-10-07');
+old=structuredClone(loan);loan.interest_rate=12;refreshFlatLoan(loan,old);assert.equal(loan.balance,560000-1506);
+old=structuredClone(loan);loan.balance=0;loan.status='closed';refreshFlatLoan(loan,old);assert.equal(loanCalculation(loan).next_payment_date,null);
+old=structuredClone(loan);loan.balance=100;refreshFlatLoan(loan,old);assert.equal(loan.next_due_date,'2027-10-06');
+const existing=initializeFlatLoan({...make(),balance:450000});assert.equal(existing.balance,500000);assert.equal(loanCalculation(existing).credited_amount,50000);
+for(const patch of [{status:'closed',balance:0},{status:'foreclosed',balance:0},{end_date:null},{interest_type:'floating'}]){const l={...make(),...patch};const before=l.balance;initializeFlatLoan(l);assert.equal(l.balance,before);assert.equal(l.interest_model,'legacy')}
+assert.deepEqual(installmentDates('2028-01-31','2028-04-30','monthly'),['2028-01-31','2028-02-29','2028-03-31','2028-04-30']);
+assert.deepEqual(installmentDates('2026-10-07','2026-10-16','weekly'),['2026-10-07','2026-10-14','2026-10-16']);
+assert.throws(()=>installmentDates('2026-10-07','2026-10-06','daily'));
+assert.equal(loanCalculation(initializeFlatLoan({...make(),interest_rate:0})).total_repayable,500000);
+console.log('PASS: full-term flat interest, rounding, schedule totals, partial payments, reversals, rate changes, closure/reopening, legacy credits and calendar boundaries.');

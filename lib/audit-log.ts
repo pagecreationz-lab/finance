@@ -2,7 +2,7 @@ import { getSupabaseAdmin, hasSupabaseConfig } from '@/lib/supabase-admin';
 import { mutateLocalStore, type StoredAuditLog } from '@/lib/local-data-store';
 import type { AppSession } from '@/lib/auth';
 
-export type AuditAction = 'receipt_correction_requested' | 'receipt_correction_approved' | 'receipt_correction_rejected' | 'change_permissions' | 'manage_manager'
+export type AuditAction = 'loan_submitted' | 'loan_approved' | 'loan_rejected' | 'customer_submitted' | 'customer_approved' | 'customer_rejected' | 'receipt_correction_requested' | 'receipt_correction_approved' | 'receipt_correction_rejected' | 'change_permissions' | 'manage_manager'
   | 'reminder_settings' | 'reminder_consent' | 'reminder_attempt' | 'reminder_result'
   | 'create_customer' | 'update_customer' | 'delete_customers' | 'assign_customer'
   | 'create_loan' | 'update_loan' | 'foreclose_loan' | 'reopen_loan'
@@ -12,6 +12,8 @@ export type AuditAction = 'receipt_correction_requested' | 'receipt_correction_a
 
 const labels:Record<AuditAction,string>={change_permissions:'Updated role permissions',manage_manager:'Managed administrator-manager account',reminder_settings:'Requested reminder configuration update',reminder_consent:'Requested reminder consent update',reminder_attempt:'Submitted reminder attempt',reminder_result:'Reminder provider result',sign_in:'Signed in',sign_out:'Signed out',upload_proof:'Uploaded proof',view_proof:'Viewed proof',ui_activity:'Portal activity',
   create_customer:'Created customer',update_customer:'Updated customer',delete_customers:'Processed customer deletion',
+  customer_submitted:'Submitted customer for approval',customer_approved:'Approved agent-created customer',customer_rejected:'Rejected agent-created customer',
+  loan_submitted:'Submitted loan for approval',loan_approved:'Approved agent-created loan',loan_rejected:'Rejected agent-created loan',
   receipt_correction_requested:'Requested receipt correction',receipt_correction_approved:'Approved receipt correction',receipt_correction_rejected:'Rejected receipt correction',
   assign_customer:'Changed collection-agent assignment',create_loan:'Created loan',update_loan:'Updated loan',
   foreclose_loan:'Foreclosed loan by override',reopen_loan:'Reopened foreclosed loan',
@@ -27,6 +29,8 @@ const entityId=(action:AuditAction,body:Record<string,unknown>)=>{
   return String(body._entity_id||body.id||'')||null;
 };
 function metadata(action:AuditAction,body:Record<string,unknown>){
+  if(['loan_submitted','loan_approved','loan_rejected'].includes(action))return {request_id:body.id,loan_id:body.loan_id,customer_id:body.customer_id,agent_id:body.agent_id,principal:body.principal,reason:body.reason};
+  if(['customer_submitted','customer_approved','customer_rejected'].includes(action))return {request_id:body.id,customer_id:body.customer_id,agent_id:body.agent_id,reason:body.reason};
   if(action.startsWith('receipt_correction_'))return {...body};
   if(action==='change_permissions')return {policy:body.policy};if(action==='manage_manager')return {activity:body.activity,name:body.name,username:body.username,password_changed:Boolean(body.password_changed)};
   if(action.startsWith('reminder_'))return {loan_id:body.loan_id,channel:body.channel,kind:body.kind,source:body.source,status:body.status,provider_sid:body.provider_sid,customer_id:body.customer_id,sms:body.sms,whatsapp:body.whatsapp,reason:body.reason,automatic:body.automatic,offsets:body.offsets};

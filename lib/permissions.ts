@@ -1,4 +1,6 @@
 export const permissionLabels = {
+  submit_loan:'Submit loans for manager approval',approve_loan:'Approve agent-created loans',
+  submit_customer:'Submit customers for manager approval',approve_customer:'Approve agent-created customers',
   request_correction:'Request receipt corrections (Super Admin approval required)',
   customers:'View customers',loans:'View loans',collections:'View collections',agents:'Monitor collection agents',reports:'View/export reports',reminders:'View/send reminders',
   create_customer:'Create customers',create_loan:'Create loans',create_agent:'Create collection agents',assign_customer:'Assign collection agents',
@@ -7,9 +9,9 @@ export const permissionLabels = {
 export type Permission=keyof typeof permissionLabels;
 export type ManagedRole='manager'|'agent';
 export type Policy=Record<ManagedRole,Permission[]>;
-export const allowedPermissions:Policy={manager:Object.keys(permissionLabels) as Permission[],agent:['customers','loans','collections','reports','reminders','create_collection']};
-export const defaultPolicy:Policy={manager:['request_correction','customers','loans','collections','agents','reports','reminders','create_customer','create_loan','create_agent','assign_customer'],agent:[...allowedPermissions.agent]};
-export const dependencies:Partial<Record<Permission,Permission[]>>={request_correction:['collections'],create_customer:['customers','agents'],create_loan:['loans','customers'],create_agent:['agents'],assign_customer:['customers','agents'],update_customer:['customers'],update_loan:['loans'],update_agent:['agents'],delete_customers:['customers'],delete_agent:['agents'],create_collection:['collections','loans','customers'],reports:['customers','loans','collections']};
+export const allowedPermissions:Policy={manager:(Object.keys(permissionLabels) as Permission[]).filter(p=>!['submit_customer','submit_loan'].includes(p)),agent:['submit_loan','submit_customer','customers','loans','collections','reports','reminders','create_collection']};
+export const defaultPolicy:Policy={manager:['approve_loan','approve_customer','request_correction','customers','loans','collections','agents','reports','reminders','create_customer','create_loan','create_agent','assign_customer'],agent:[...allowedPermissions.agent]};
+export const dependencies:Partial<Record<Permission,Permission[]>>={submit_loan:['customers','loans'],approve_loan:['customers','loans'],submit_customer:['customers'],approve_customer:['customers'],request_correction:['collections'],create_customer:['customers','agents'],create_loan:['loans','customers'],create_agent:['agents'],assign_customer:['customers','agents'],update_customer:['customers'],update_loan:['loans'],update_agent:['agents'],delete_customers:['customers'],delete_agent:['agents'],create_collection:['collections','loans','customers'],reports:['customers','loans','collections']};
 export function validatePolicy(value:unknown):Policy {
   if(!value||typeof value!=='object')throw new Error('Invalid role permissions');
   const result={} as Policy;

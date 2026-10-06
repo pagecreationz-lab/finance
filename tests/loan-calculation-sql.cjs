@@ -1,0 +1,46 @@
+const {PGlite}=require(process.argv[2]),fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),Module=require('node:module'),ts=require('typescript');
+Module._extensions['.ts']=function(mod,file){mod._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file)};
+const {initializeFlatLoan,loanCalculation}=require('../lib/loan-calculation.ts');
+(async()=>{const db=new PGlite();try{
+ await db.exec("create role anon;create role authenticated;create role service_role bypassrls;create table public.users(id text primary key);insert into public.users values('customer');create table public.audit_logs(id text primary key,actor_id text,actor_name text,actor_role text,action text,entity_type text,entity_id text,summary text,metadata jsonb,created_at bigint);");
+ const schema=fs.readFileSync(path.join(__dirname,'../supabase/schema.sql'),'utf8');
+ await db.exec(schema.match(/create table if not exists public.loans \([\s\S]*?\);/)[0]);
+ await db.exec('alter table public.loans add column end_date date;grant all on public.loans,public.users,public.audit_logs to service_role;');
+ const insert=async(id,balance=500000,status='active',frequency='daily',first='2026-10-07',end='2027-10-06')=>db.query("insert into public.loans(id,customer_id,principal,balance,interest_type,interest_rate,repayment_frequency,given_date,next_due_date,end_date,security_type,status)values($1,'customer',500000,$2,'fixed',10,$3,'2026-10-06',$4,$5,'asset',$6)",[id,balance,frequency,first,end,status]);
+ await insert('existing',450000);await insert('closed',0,'closed');
+ const migration=fs.readFileSync(path.join(__dirname,'../supabase/migrations/20261006125754_flat_term_loan_calculation.sql'),'utf8');
+ await db.exec(migration);await db.exec(migration);
+ const get=async(id)=>(await db.query('select * from public.loans where id=$1',[id])).rows[0];
+ assert.equal(Number((await get('existing')).balance),500000);assert.equal((await get('existing')).interest_model,'flat_term_v1');
+ assert.equal(Number((await get('closed')).balance),0);assert.equal((await get('closed')).interest_model,'legacy');
+ assert.equal((await db.query('select count(*)::int n from public.audit_logs')).rows[0].n,1);
+ await db.exec('set role service_role');
+ await insert('new');
+ assert.equal(Number((await get('new')).balance),550000);
+ const date=r=>r.next_due_date instanceof Date?r.next_due_date.toISOString().slice(0,10):String(r.next_due_date).slice(0,10);
+ await db.exec("update public.loans set balance=balance-100 where id='new'");
+ assert.equal(date(await get('new')),'2026-10-07');
+ await db.exec("update public.loans set balance=balance-1407 where id='new'");
+ assert.equal(date(await get('new')),'2026-10-08');
+ await db.exec("update public.loans set balance=balance+1 where id='new'");
+ assert.equal(date(await get('new')),'2026-10-07');
+ await db.exec("update public.loans set interest_rate=12 where id='new'");
+ assert.equal(Number((await get('new')).balance),560000-1506);
+ await db.exec("update public.loans set balance=0,status='closed' where id='new'");
+ await assert.rejects(db.exec("update public.loans set interest_rate=10 where id='new'"));
+ await db.exec("update public.loans set balance=100,status='active' where id='new'");
+ assert.equal(date(await get('new')),'2027-10-06');
+ await assert.rejects(db.exec("update public.loans set balance=-1 where id='new'"));
+ await db.exec("update public.loans set balance=0,status='foreclosed' where id='new'");
+ await db.exec("update public.loans set balance=100,status='active' where id='new'");
+ assert.equal(Number((await get('new')).balance),100);
+ for(const frequency of ['daily','weekly','monthly','yearly']){
+  const id='parity-'+frequency;await insert(id,500000,'active',frequency,'2026-10-31','2028-03-31');
+  const local=initializeFlatLoan({principal:500000,balance:500000,interest_rate:10,interest_type:'fixed',repayment_frequency:frequency,given_date:'2026-10-06',next_due_date:'2026-10-31',end_date:'2028-03-31',status:'active'});
+  const amount=loanCalculation(local).schedule.slice(0,2).reduce((s,r)=>s+r.amount,0)+1;
+  await db.query('update public.loans set balance=balance-$1 where id=$2',[amount,id]);local.balance-=amount;
+  assert.equal(date(await get(id)),loanCalculation(local).next_payment_date);
+ }
+ await db.exec('reset role;set role anon');await assert.rejects(db.query("select public.rmv_term_interest(500000,10)"));
+ console.log('PASS: PostgreSQL migration/idempotence/audit, new loans, partial/advance payments, corrections, rate edits, closure/reopening, overpayment protection, all-cadence JS parity and role restrictions.');
+ }finally{await db.close()}})().catch(e=>{console.error(e);process.exitCode=1});

@@ -1,12 +1,13 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import {initializeFlatLoan,refreshFlatLoan} from './loan-calculation';
 import type { ReminderStore } from './reminder-types';
 
 export type StoredUser = { id:string; name:string; phone:string; email:string|null; role:string; assigned_agent_id:string|null; created_at:number; occupation?:string|null; username?:string|null; password_hash?:string|null };
-export type StoredLoan = { id:string; customer_id:string; principal:number; balance:number; interest_type:string; interest_rate:number; repayment_frequency:string; end_date?:string|null; given_date:string; next_due_date:string; security_type:string; security_file_key:string|null; remarks:string|null; status:string; foreclosed_at?:number|null; foreclosure_amount?:number|null; foreclosure_waived?:number|null; foreclosure_proof_file_key?:string|null; foreclosure_remarks?:string|null; foreclosed_by?:string|null; reopened_at?:number|null; reopen_reason?:string|null; reopened_by?:string|null };
+export type StoredLoan = { interest_model?:string|null; interest_amount?:number|null; first_due_date?:string|null; id:string; customer_id:string; principal:number; balance:number; interest_type:string; interest_rate:number; repayment_frequency:string; end_date?:string|null; given_date:string; next_due_date:string; security_type:string; security_file_key:string|null; remarks:string|null; status:string; foreclosed_at?:number|null; foreclosure_amount?:number|null; foreclosure_waived?:number|null; foreclosure_proof_file_key?:string|null; foreclosure_remarks?:string|null; foreclosed_by?:string|null; reopened_at?:number|null; reopen_reason?:string|null; reopened_by?:string|null };
 export type StoredCollection = { customer_signature?:number[][][]|null; signature_at?:number|null; id:string; loan_id:string; agent_id:string|null; collected_by_name?:string; amount:number; method:string; proof_file_key:string|null; remarks:string|null; collected_at:number };
 export type StoredAuditLog = { id:string; actor_id:string; actor_name:string; actor_role:string; action:string; entity_type:string; entity_id:string|null; summary:string; metadata:Record<string,unknown>; created_at:number };
-export type LocalFinanceData = { receipt_corrections?:import('./receipt-corrections').ReceiptCorrection[]; role_permissions?:import("./permissions").Policy; users:StoredUser[]; loans:StoredLoan[]; collections:StoredCollection[]; audit_logs:StoredAuditLog[]; reminders?:ReminderStore };
+export type LocalFinanceData = { loan_requests?:import('./loan-requests').LoanRequest[]; customer_requests?:import('./customer-requests').CustomerRequest[]; receipt_corrections?:import('./receipt-corrections').ReceiptCorrection[]; role_permissions?:import("./permissions").Policy; users:StoredUser[]; loans:StoredLoan[]; collections:StoredCollection[]; audit_logs:StoredAuditLog[]; reminders?:ReminderStore };
 
 const dataPath = () => process.env.FUNDFLOW_LOCAL_DATA_PATH || path.join(process.cwd(), '.local-data', 'fundflow.json');
 const agentHash='scrypt$192c4da34ba6bff377e0787211fdb553$6f237eaf810fe835719eb335f5592047ff4224fb3ac2ab0e29149a5e2c74b1ed1022d569ed8c1d4c8734b2f1f5bd73af7dff0400d0244398b0b47bc8c4308d1d';
@@ -36,6 +37,12 @@ const seedData: LocalFinanceData = {
 };
 function normalizeUsers(data:LocalFinanceData){
   data.audit_logs??=[];
+  for(const loan of data.loans){
+    if(loan.interest_model)continue;
+    const before=loan.balance;
+    try{initializeFlatLoan(loan)}catch{loan.interest_model='legacy'}
+    if(loan.interest_model==='flat_term_v1')data.audit_logs.push({id:'LOG-flat-term-'+loan.id,actor_id:'system',actor_name:'Loan calculation migration',actor_role:'admin',action:'loan_calculation_migrated',entity_type:'loan',entity_id:loan.id,summary:'Applied full-term flat interest while preserving existing credits',metadata:{previous_balance:before,balance:loan.balance,interest_amount:loan.interest_amount},created_at:Math.floor(Date.now()/1000)});
+  }
   const usernames:Record<string,string>={'agent-deepak':'deepak','agent-meera':'meera','agent-akash':'akash','customer-arjun':'arjun','customer-priya':'priya','customer-ravi':'ravi','customer-neha':'neha'};
   for(const user of data.users){
     user.username??=usernames[user.id]||null;
@@ -58,7 +65,7 @@ export async function readLocalStore(): Promise<LocalFinanceData> {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     const initial = structuredClone(seedData);
     await writeStore(initial);
-    return initial;
+    return normalizeUsers(initial);
   }
 }
 export function mutateLocalStore<T>(mutator:(data:LocalFinanceData)=>T|Promise<T>): Promise<T> {
@@ -66,7 +73,9 @@ export function mutateLocalStore<T>(mutator:(data:LocalFinanceData)=>T|Promise<T
     const data = await readLocalStore();
     const previousLogs = new Map(data.audit_logs.map(log=>[log.id,JSON.stringify(log)]));
     const previousCorrections=structuredClone(data.receipt_corrections||[]);
+    const previousLoans=new Map(data.loans.map(loan=>[loan.id,structuredClone(loan)]));
     const result = await mutator(data);
+    for(const loan of data.loans){const previous=previousLoans.get(loan.id);if(previous)refreshFlatLoan(loan,previous);else initializeFlatLoan(loan);}
     const nextLogs = new Map(data.audit_logs.map(log=>[log.id,JSON.stringify(log)]));
     if(nextLogs.size!==data.audit_logs.length||[...previousLogs].some(([id,value])=>nextLogs.get(id)!==value))throw new Error('Audit logs cannot be edited or deleted');
     for(const old of previousCorrections){
