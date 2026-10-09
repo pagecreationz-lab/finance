@@ -762,3 +762,315 @@ revoke all on function public.rmv_term_interest(bigint,double precision),public.
 grant execute on function public.rmv_term_interest(bigint,double precision),public.rmv_installment_dates(date,date,text),public.rmv_calculate_loan() to service_role;
 commit;
 notify pgrst,'reload schema';
+
+-- Preserve the installed function's assignment checks, locks, audit and role grants.
+begin;
+do $migration$
+declare definition text;
+begin
+ select pg_get_functiondef('public.rmv_record_collection(jsonb,text,text,jsonb)'::regprocedure) into definition;
+ definition=replace(definition,$guard$if p_role='agent' and (sig is null or jsonb_typeof(sig)<>'array' or jsonb_array_length(sig)=0) then raise exception 'Customer signature required'; end if;$guard$,'-- Customer signatures are optional; existing signed receipts remain immutable.');
+ if position('Customer signature required' in definition)>0 then raise exception 'Unexpected collection function version; review signature validation before deploying'; end if;
+ execute definition;
+end;
+$migration$;
+commit;
+notify pgrst,'reload schema';
+
+-- Apply after agent loan approval and flat-term interest migrations.
+begin;
+alter table public.loan_requests alter column customer_id drop not null;
+alter table public.loan_requests add column loan_number text;
+alter table public.loan_requests add column new_customer jsonb;
+alter table public.loan_requests add constraint loan_request_customer_present check(customer_id is not null or new_customer is not null);
+alter table public.loan_requests add constraint loan_request_number_format check(loan_number is null or loan_number ~ '^[A-Z0-9][A-Z0-9/_-]{0,39}$');
+create unique index loan_request_pending_number on public.loan_requests(loan_number) where status='pending' and loan_number is not null;
+-- Fails safely if pre-existing case-insensitive duplicates need review; never changes historical IDs.
+create unique index loans_number_case_insensitive on public.loans(upper(id));
+create or replace function public.rmv_loan_request(p_body jsonb,p_actor text,p_name text,p_role text)
+returns jsonb language plpgsql security invoker set search_path='' as $$
+declare r public.loan_requests; action text=p_body->>'action'; stamp bigint=extract(epoch from now())::bigint;
+ reason_text text=nullif(trim(p_body->>'reason'),''); actor_role text; actor_name text; policy jsonb; borrower_name text; new_borrower jsonb=nullif(p_body->'new_customer','null'::jsonb); number_text text=upper(trim(p_body->>'loan_number')); created_customer text;
+begin
+ if action is null or action not in ('submit','approve','reject') or p_role is null or p_role not in ('admin','manager','agent') then raise exception 'Access denied'; end if;
+ if p_role<>'admin' then
+   select u.role,u.name into actor_role,actor_name from public.users u where u.id=p_actor;
+   if actor_role is distinct from p_role then raise exception 'Account no longer active'; end if;
+   select rp.policy into policy from public.role_permissions rp where rp.id=1;
+   if not coalesce((policy->p_role) ?& array['customers','loans',case when p_role='agent' then 'submit_loan' else 'approve_loan' end],false) then raise exception 'Permission denied'; end if;
+ else actor_name=p_name;
+ end if;
+ if action='submit' then
+   if number_text is null or number_text !~ '^[A-Z0-9][A-Z0-9/_-]{0,39}$' then raise exception 'Enter a valid manual loan number'; end if;
+   if new_borrower is not null then
+     if not coalesce((policy->p_role) ? 'submit_customer',false) then raise exception 'Customer submission permission required'; end if;
+     if nullif(p_body->>'customer_id','') is not null or jsonb_typeof(new_borrower)<>'object'
+       or coalesce(length(trim(new_borrower->>'name')),0) not between 1 and 100
+       or coalesce(new_borrower->>'phone','') !~ '^[0-9]{7,15}$'
+       or coalesce(length(trim(new_borrower->>'occupation')),0) not between 1 and 120
+       or length(coalesce(new_borrower->>'email',''))>254
+       then raise exception 'Valid new customer details required'; end if;
+   end if;
+   if p_role<>'agent' then raise exception 'Only agents submit loans'; end if;
+   perform pg_advisory_xact_lock(hashtextextended('loan-request:'||(p_body->>'id'),0));
+   select * into r from public.loan_requests where id=p_body->>'id';
+   if found then
+     if r.agent_id<>p_actor or coalesce(r.customer_id,'') is distinct from coalesce(p_body->>'customer_id','') or r.loan_number is distinct from number_text or r.new_customer is distinct from new_borrower or r.principal is distinct from (p_body->>'principal')::bigint
+       or r.interest_type is distinct from p_body->>'interest_type' or r.interest_rate is distinct from (p_body->>'interest_rate')::double precision
+       or r.repayment_frequency is distinct from p_body->>'repayment_frequency' or r.given_date is distinct from (p_body->>'given_date')::date
+       or r.next_due_date is distinct from (p_body->>'next_due_date')::date or r.end_date is distinct from (p_body->>'end_date')::date
+       or r.security_type is distinct from p_body->>'security_type' or r.remarks is distinct from nullif(p_body->>'remarks','') then raise exception 'Request ID already used'; end if;
+     return to_jsonb(r);
+   end if;
+   perform pg_advisory_xact_lock(hashtextextended('loan-number:'||number_text,0));
+   if exists(select 1 from public.loans where upper(id)=number_text) or exists(select 1 from public.loan_requests where loan_number=number_text and status='pending') then raise exception 'Loan number already in use or awaiting approval'; end if;
+   if new_borrower is not null then borrower_name=new_borrower->>'name';
+   else
+   select name into borrower_name from public.users where id=p_body->>'customer_id' and role='customer' and assigned_agent_id=p_actor for share;
+   if not found then raise exception 'Choose an approved customer currently assigned to you'; end if; end if;
+   if (p_body->>'principal')::numeric<>trunc((p_body->>'principal')::numeric) then raise exception 'Whole-rupee loan amount required'; end if;
+   insert into public.loan_requests(id,agent_id,agent_name,customer_id,customer_name,principal,interest_type,interest_rate,repayment_frequency,given_date,next_due_date,end_date,security_type,remarks,created_at,loan_number,new_customer)
+   values(p_body->>'id',p_actor,actor_name,nullif(p_body->>'customer_id',''),borrower_name,(p_body->>'principal')::bigint,p_body->>'interest_type',(p_body->>'interest_rate')::double precision,p_body->>'repayment_frequency',(p_body->>'given_date')::date,(p_body->>'next_due_date')::date,(p_body->>'end_date')::date,p_body->>'security_type',nullif(p_body->>'remarks',''),stamp,number_text,new_borrower) returning * into r;
+ else
+   if p_role not in ('admin','manager') then raise exception 'Admin Manager approval required'; end if;
+   if length(reason_text)>1000 then raise exception 'Review reason must be at most 1,000 characters'; end if;
+   select * into r from public.loan_requests where id=p_body->>'id' for update;
+   if not found then raise exception 'Request not found'; end if;
+   if r.status<>'pending' then raise exception 'Request already reviewed'; end if;
+   if r.new_customer is not null and p_role<>'admin' and not coalesce((policy->p_role) ? 'approve_customer',false) then raise exception 'Customer approval permission required'; end if;
+   if action='approve' then
+     number_text=coalesce(r.loan_number,'LN-'||r.id);
+     perform pg_advisory_xact_lock(hashtextextended('loan-number:'||upper(number_text),0));
+     if exists(select 1 from public.loans where upper(id)=upper(number_text)) then raise exception 'Loan number already in use'; end if;
+     perform 1 from public.users where id=r.agent_id and role='agent' for update;
+     if not found then raise exception 'Submitting agent is no longer active. Reject this request.'; end if;
+     if r.new_customer is not null then
+       created_customer='customer-loan-'||r.id;
+       insert into public.users(id,name,phone,email,occupation,role,assigned_agent_id,created_at)
+       values(created_customer,r.new_customer->>'name',r.new_customer->>'phone',nullif(r.new_customer->>'email',''),r.new_customer->>'occupation','customer',r.agent_id,stamp);
+       r.customer_id=created_customer;
+     else
+     perform 1 from public.users where id=r.customer_id and role='customer' and assigned_agent_id=r.agent_id for update;
+     if not found then raise exception 'Customer is no longer active or assigned to the submitting agent. Reject and resubmit.'; end if; end if;
+     insert into public.loans(id,customer_id,principal,balance,interest_type,interest_rate,repayment_frequency,given_date,next_due_date,end_date,security_type,security_file_key,remarks,status)
+     values(number_text,r.customer_id,r.principal,r.principal,r.interest_type,r.interest_rate,r.repayment_frequency,r.given_date,r.next_due_date,r.end_date,r.security_type,null,r.remarks,
+       case when r.next_due_date<(now() at time zone 'Asia/Kolkata')::date then 'overdue' else 'active' end);
+   end if;
+   update public.loan_requests set status=case when action='approve' then 'approved' else 'rejected' end,
+     customer_id=r.customer_id,loan_id=case when action='approve' then number_text else null end,reviewed_by=p_actor,reviewed_at=stamp,review_reason=reason_text where id=r.id returning * into r;
+ end if;
+ insert into public.audit_logs(id,actor_id,actor_name,actor_role,action,entity_type,entity_id,summary,metadata,created_at)
+ values('LOG-'||gen_random_uuid(),p_actor,actor_name,p_role,
+ case when action='submit' then 'loan_submitted' when action='approve' then 'loan_approved' else 'loan_rejected' end,
+ 'loan',r.id,case when action='submit' then 'Submitted loan for approval' when action='approve' then 'Approved agent-created loan' else 'Rejected agent-created loan' end,
+ jsonb_build_object('request_id',r.id,'loan_id',r.loan_id,'customer_id',r.customer_id,'agent_id',r.agent_id,'principal',r.principal,'combined',r.new_customer is not null,'loan_number',r.loan_number,'reason',reason_text),stamp);
+ return to_jsonb(r);
+end;$$;
+revoke all on function public.rmv_loan_request(jsonb,text,text,text) from public,anon,authenticated;
+grant execute on function public.rmv_loan_request(jsonb,text,text,text) to service_role;
+commit;
+notify pgrst,'reload schema';
+
+-- Run after combined customer/loan approval. Receipts remain immutable.
+begin;
+create or replace function public.rmv_upfront_interest(p bigint,r double precision)
+returns bigint language plpgsql immutable set search_path='' as $$
+declare interest numeric;
+begin
+ if p is null or p<=0 or p>9007199254740991 or r is null or r<0 or r>=100 or r='NaN'::double precision or abs(r*10000-round(r*10000))>0.000001 then raise exception 'Valid lending amount and upfront rate below 100%% required'; end if;
+ interest=floor((p::numeric*round((r*10000)::numeric)+500000)/1000000);
+ if interest>=p then raise exception 'Remaining repayable amount must be positive'; end if;
+ return interest::bigint;
+end;$$;
+create or replace function public.rmv_upfront_dates(start_date date,frequency text)
+returns date[] language plpgsql immutable set search_path='' as $$
+declare dates date[]='{}'; i integer; n integer; m date; d date;
+begin
+ if start_date is null or start_date<'1900-01-01' or frequency is null or frequency not in ('daily','weekly','monthly','yearly') then raise exception 'Valid start date and loan type required'; end if;
+ n=case frequency when 'daily' then 100 when 'weekly' then 10 else 12 end;
+ for i in 1..n loop
+  if frequency in ('daily','weekly') then d=start_date+i*(case frequency when 'daily' then 1 else 7 end);
+  else
+   m=(date_trunc('month',start_date)+i*interval '1 month')::date;
+   d=m+least(extract(day from start_date)::integer,extract(day from (m+interval '1 month - 1 day'))::integer)-1;
+  end if;
+  if d>'9999-12-31' then raise exception 'End date outside supported range'; end if;
+  dates=array_append(dates,d);
+ end loop;
+ return dates;
+end;$$;
+create or replace function public.rmv_calculate_upfront_loan()
+returns trigger language plpgsql security invoker set search_path='' as $$
+declare interest bigint; total bigint; old_total bigint; dates date[]; n integer; base bigint; extra bigint; credited bigint; cumulative bigint=0; i integer; due date;
+begin
+ if tg_op='UPDATE' and old.interest_model<>'upfront_net_v1' and new.interest_model<>'upfront_net_v1' then return new; end if;
+ if new.interest_type<>'fixed' then raise exception 'New loans require upfront fixed-rate deduction'; end if;
+ interest=public.rmv_upfront_interest(new.principal,new.interest_rate);total=new.principal-interest;
+ dates=public.rmv_upfront_dates(new.given_date,new.repayment_frequency);
+ if tg_op='INSERT' then
+  if new.balance<>new.principal then raise exception 'New loans must start with untouched lending amount'; end if;
+  new.balance=total;new.interest_model='upfront_net_v1';
+ elsif old.interest_model='upfront_net_v1' then
+  if new.interest_model<>old.interest_model then raise exception 'Interest model cannot be changed'; end if;
+  if old.status in ('closed','foreclosed') and (new.principal,new.interest_rate,new.given_date,new.repayment_frequency) is distinct from (old.principal,old.interest_rate,old.given_date,old.repayment_frequency) then raise exception 'Settled loan terms cannot be changed'; end if;
+  new.balance=new.balance+total-(old.principal-old.interest_amount);
+ else
+  old_total=old.principal+case when old.interest_model='flat_term_v1' then coalesce(old.interest_amount,0) else 0 end;
+  if old.status not in ('active','overdue') or old.balance>old_total then raise exception 'Loan needs manual review before conversion'; end if;
+  new.balance=total-(old_total-old.balance);
+ end if;
+ if new.balance<0 or new.balance>total then raise exception 'Revised total is below existing credits or balance'; end if;
+ new.interest_amount=interest;new.first_due_date=dates[1];new.end_date=dates[cardinality(dates)];
+ if new.repayment_frequency='monthly' then new.repayment_frequency='yearly'; end if;
+ if new.status='foreclosed' then return new; end if;
+ n=cardinality(dates);base=total/n;extra=total%n;credited=total-new.balance;
+ for i in 1..n loop
+  cumulative=cumulative+base+case when i<=extra then 1 else 0 end;
+  if cumulative>credited then due=dates[i];exit;end if;
+ end loop;
+ new.next_due_date=coalesce(due,new.end_date);
+ new.status=case when new.balance=0 then 'closed' when new.next_due_date<(now() at time zone 'Asia/Kolkata')::date then 'overdue' else 'active' end;
+ return new;
+end;$$;
+drop trigger if exists rmv_calculate_loan on public.loans;
+-- Retain historical calculations for skipped/settled old-model loans.
+create trigger rmv_legacy_calculate_loan before update on public.loans for each row
+ when (old.interest_model<>'upfront_net_v1' and new.interest_model<>'upfront_net_v1')
+ execute function public.rmv_calculate_loan();
+create trigger rmv_upfront_loan before insert or update on public.loans for each row execute function public.rmv_calculate_upfront_loan();
+
+-- Conservative conversion with per-loan validation. Exceptions retain the original record.
+do $$
+declare l public.loans; previous_balance bigint; new_balance bigint;
+begin
+ for l in select * from public.loans where status in ('active','overdue') and interest_type='fixed' and interest_model<>'upfront_net_v1' for update loop
+  begin
+   previous_balance=l.balance;
+   update public.loans set interest_model='upfront_net_v1' where id=l.id returning balance into new_balance;
+   insert into public.audit_logs(id,actor_id,actor_name,actor_role,action,entity_type,entity_id,summary,metadata,created_at)
+   values('LOG-upfront-'||l.id,'system','Loan calculation migration','admin','loan_calculation_migrated','loan',l.id,
+    'Applied upfront deduction and default term, preserving credits',jsonb_build_object('previous_balance',previous_balance,'balance',new_balance,'previous_model',l.interest_model),extract(epoch from now())::bigint);
+  exception when others then
+   raise notice 'Loan % retained for review: %',l.id,sqlerrm;
+  end;
+ end loop;
+end;$$;
+
+alter table public.loan_requests drop constraint if exists loan_requests_repayment_frequency_check;
+alter table public.loan_requests add constraint loan_requests_repayment_frequency_check check(repayment_frequency in ('daily','weekly','monthly','yearly'));
+-- Normalize submitted terms before existing idempotence and authorization logic.
+do $migration$
+declare definition text;
+begin
+ select pg_get_functiondef('public.rmv_loan_request(jsonb,text,text,text)'::regprocedure) into definition;
+ definition=replace(definition,'created_customer text;','created_customer text; auto_dates date[];');
+ definition=replace(definition,' if action is null or action not in', $normal$
+ if action='submit' then
+  perform public.rmv_upfront_interest((p_body->>'principal')::bigint,(p_body->>'interest_rate')::double precision);
+  auto_dates=public.rmv_upfront_dates((p_body->>'given_date')::date,p_body->>'repayment_frequency');
+  p_body=p_body||jsonb_build_object('next_due_date',auto_dates[1],'end_date',auto_dates[cardinality(auto_dates)],'repayment_frequency',case when p_body->>'repayment_frequency'='monthly' then 'yearly' else p_body->>'repayment_frequency' end);
+ end if;
+ if action is null or action not in$normal$);
+ if position('auto_dates date[]' in definition)=0 then raise exception 'Combined approval migration is required first'; end if;
+ execute definition;
+end;
+$migration$;
+revoke all on function public.rmv_upfront_interest(bigint,double precision),public.rmv_upfront_dates(date,text),public.rmv_calculate_upfront_loan() from public,anon,authenticated;
+grant execute on function public.rmv_upfront_interest(bigint,double precision),public.rmv_upfront_dates(date,text),public.rmv_calculate_upfront_loan() to service_role;
+commit;
+notify pgrst,'reload schema';
+
+begin;
+-- Called inside the existing collection RPC after its FOR UPDATE loan lock.
+create or replace function public.rmv_exact_installment(l public.loans)
+returns bigint language plpgsql security invoker set search_path=public as $$
+declare total bigint; dates date[]; count_dates integer; base bigint; extra bigint; credited bigint; cumulative bigint=0; installment bigint; i integer;
+begin
+ if l.status in ('closed','foreclosed') or l.balance<=0 then raise exception 'No outstanding installment to collect'; end if;
+ if l.interest_model='upfront_net_v1' then
+  total=l.principal-public.rmv_upfront_interest(l.principal,l.interest_rate);
+  dates=public.rmv_upfront_dates(l.given_date,l.repayment_frequency);
+ elsif l.interest_model='flat_term_v1' then
+  total=l.principal+public.rmv_term_interest(l.principal,l.interest_rate);
+  dates=public.rmv_installment_dates(coalesce(l.first_due_date,l.next_due_date),l.end_date,l.repayment_frequency);
+ else raise exception 'Loan schedule requires admin review before collection'; end if;
+ if l.balance>total then raise exception 'Invalid loan balance'; end if;
+ count_dates=cardinality(dates);base=total/count_dates;extra=total%count_dates;credited=total-l.balance;
+ for i in 1..count_dates loop
+  installment=base+case when i<=extra then 1 else 0 end;
+  cumulative=cumulative+installment;
+  if cumulative>credited then return least(installment,cumulative-credited); end if;
+ end loop;
+ raise exception 'No outstanding installment to collect';
+end;$$;
+revoke all on function public.rmv_exact_installment(public.loans) from public,anon,authenticated;
+grant execute on function public.rmv_exact_installment(public.loans) to service_role;
+do $migration$
+declare definition text; anchor text=$anchor$  sig=nullif(p_receipt->'customer_signature','null'::jsonb);$anchor$;
+begin
+ select pg_get_functiondef('public.rmv_record_collection(jsonb,text,text,jsonb)'::regprocedure) into definition;
+ if position(anchor in definition)=0 then raise exception 'Unexpected collection RPC version'; end if;
+ definition=replace(definition,anchor,$guard$
+  if p_role='agent' and amount_received<>public.rmv_exact_installment(l) then
+   raise exception 'Collect exactly ₹% for the next installment. Refresh the loan before retrying.', public.rmv_exact_installment(l);
+  end if;
+$guard$||anchor);
+ execute definition;
+end;$migration$;
+commit;
+notify pgrst,'reload schema';
+
+begin;
+alter table public.loans add column if not exists loan_number text;
+create unique index loans_display_number_unique on public.loans(upper(coalesce(loan_number,id)));
+create or replace function public.rmv_guard_loan_number()
+returns trigger language plpgsql security invoker set search_path=public as $$
+declare number_text text;
+begin
+ perform pg_advisory_xact_lock(90817365);
+ if tg_table_name='loans' then
+  number_text=upper(coalesce(new.loan_number,new.id));
+  if new.loan_number is not null and new.loan_number !~ '^[A-Z0-9][A-Z0-9/_-]{0,39}$' then raise exception 'Invalid loan number'; end if;
+  if exists(select 1 from public.loans where id<>new.id and (upper(id)=number_text or upper(coalesce(loan_number,id))=number_text or upper(coalesce(loan_number,id))=upper(new.id))) then raise exception 'Loan number already in use'; end if;
+ else
+  if new.status='pending' and exists(select 1 from public.loans where upper(coalesce(loan_number,id))=upper(new.loan_number)) then raise exception 'Loan number already in use'; end if;
+ end if;
+ return new;
+end;$$;
+create trigger rmv_guard_loan_number before insert or update of loan_number on public.loans for each row execute function public.rmv_guard_loan_number();
+create trigger rmv_guard_requested_number before insert or update of loan_number on public.loan_requests for each row execute function public.rmv_guard_loan_number();
+create or replace function public.rmv_rename_loan_number(p_id text,p_number text,p_event jsonb)
+returns void language plpgsql security invoker set search_path=public as $$
+declare old_number text; number_text text=upper(trim(p_number));
+begin
+ if p_event->>'actor_role' is distinct from 'admin' or not exists(select 1 from public.users where id=p_event->>'actor_id' and role='admin') then raise exception 'Super admin required'; end if;
+ if number_text is null or number_text !~ '^[A-Z0-9][A-Z0-9/_-]{0,39}$' then raise exception 'Invalid loan number'; end if;
+ perform pg_advisory_xact_lock(90817365);
+ select coalesce(loan_number,id) into old_number from public.loans where id=p_id for update;
+ if not found then raise exception 'Loan not found'; end if;
+ if exists(select 1 from public.loan_requests where status='pending' and upper(loan_number)=number_text) then raise exception 'Loan number awaiting approval'; end if;
+ update public.loans set loan_number=number_text where id=p_id;
+ insert into public.audit_logs select * from jsonb_populate_record(null::public.audit_logs,p_event||jsonb_build_object('entity_id',p_id,'metadata',jsonb_build_object('previous_loan_number',old_number,'loan_number',number_text)));
+end;$$;
+revoke all on function public.rmv_guard_loan_number(),public.rmv_rename_loan_number(text,text,jsonb) from public,anon,authenticated;
+grant execute on function public.rmv_guard_loan_number(),public.rmv_rename_loan_number(text,text,jsonb) to service_role;
+commit;
+notify pgrst,'reload schema';
+
+begin;
+-- Daily installments cover start date through start + 99 days.
+-- Preserve weekly/monthly anchors and existing service-only function grants.
+do $migration$
+declare definition text; old_expression text='d=start_date+i*(case frequency when ''daily'' then 1 else 7 end);';
+begin
+ select pg_get_functiondef('public.rmv_upfront_dates(date,text)'::regprocedure) into definition;
+ if position(old_expression in definition)=0 then raise exception 'Unexpected upfront date function version'; end if;
+ execute replace(definition,old_expression,'d=start_date+(case frequency when ''daily'' then i-1 else i*7 end);');
+end;$migration$;
+-- Existing calculation trigger refreshes dates/status without changing credits.
+update public.loans set next_due_date=next_due_date
+where interest_model='upfront_net_v1' and repayment_frequency='daily' and status in ('active','overdue');
+update public.loan_requests set next_due_date=given_date,end_date=given_date+99
+where repayment_frequency='daily' and status='pending';
+commit;
+notify pgrst,'reload schema';

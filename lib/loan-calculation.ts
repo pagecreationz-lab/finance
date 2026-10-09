@@ -1,4 +1,5 @@
 import {validDate} from './collection-records';
+import {UPFRONT_MODEL,upfrontCalculation,refreshUpfrontLoan} from './upfront-loan';
 export type CalculatedLoan={principal:number;balance:number;interest_rate:number;interest_type:string;repayment_frequency:string;given_date:string;end_date?:string|null;next_due_date:string;status:string;interest_model?:string|null;interest_amount?:number|null;first_due_date?:string|null};
 export const FLAT_MODEL='flat_term_v1';
 export function flatInterest(principal:number,rate:number){
@@ -26,6 +27,7 @@ export function defaultFirstDue(start:string,end:string,frequency:string){
  return d.toISOString().slice(0,10)>end?end:d.toISOString().slice(0,10);
 }
 export function loanCalculation(loan:CalculatedLoan,today=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Kolkata',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date())){
+ if(loan.interest_model===UPFRONT_MODEL)return upfrontCalculation(loan,today);
  const interest=flatInterest(Number(loan.principal),Number(loan.interest_rate)),total=Number(loan.principal)+interest;
  const first=loan.first_due_date||loan.next_due_date||defaultFirstDue(loan.given_date,String(loan.end_date),loan.repayment_frequency);
  if(!validDate(loan.given_date)||first<loan.given_date)throw new Error('First due date must be on or after the start date.');
@@ -46,6 +48,7 @@ export function initializeFlatLoan<T extends CalculatedLoan>(loan:T):T{
  refreshFlatLoan(loan);return loan;
 }
 export function refreshFlatLoan(loan:CalculatedLoan,previous?:CalculatedLoan){
+ if(loan.interest_model===UPFRONT_MODEL)return refreshUpfrontLoan(loan,previous);
  if(loan.interest_model!==FLAT_MODEL)return;
  if(previous&&(loan.interest_type!==previous.interest_type||loan.interest_model!==previous.interest_model))throw new Error('Loan interest model cannot be changed.');
  if(previous&&(loan.principal!==previous.principal||loan.interest_rate!==previous.interest_rate||loan.end_date!==previous.end_date||loan.repayment_frequency!==previous.repayment_frequency||loan.next_due_date!==previous.next_due_date)&&['closed','foreclosed'].includes(previous.status))throw new Error('Closed or foreclosed loan terms cannot be changed.');
@@ -62,6 +65,12 @@ export function refreshFlatLoan(loan:CalculatedLoan,previous?:CalculatedLoan){
  loan.status=loan.balance===0?'closed':loan.next_due_date<today?'overdue':'active';
 }
 export function loanSummary(loan:CalculatedLoan){
- if(loan.interest_model!==FLAT_MODEL)return {};
+ if(loan.interest_model!==FLAT_MODEL&&loan.interest_model!==UPFRONT_MODEL)return {};
  const {schedule,...summary}=loanCalculation(loan);void schedule;return summary;
+}
+export function exactCollectionAmount(loan:CalculatedLoan):number {
+ if(loan.interest_model!==FLAT_MODEL&&loan.interest_model!==UPFRONT_MODEL)throw new Error('Loan schedule requires admin review before collection.');
+ const amount=loanCalculation(loan).next_installment_due;
+ if(!Number.isSafeInteger(amount)||amount<=0)throw new Error('No outstanding installment to collect.');
+ return amount;
 }

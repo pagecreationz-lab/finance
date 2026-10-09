@@ -1,0 +1,13 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),Module=require('node:module'),ts=require('typescript');
+Module._extensions['.ts']=function(mod,file){mod._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file)};
+const {loanLedger}=require('../lib/loan-ledger.ts');
+const receipt=(date,amount)=>({collected_at:Date.parse(date)/1000,amount});
+let rows=loanLedger([receipt('2026-10-08T20:00:00Z',90)],'daily','2026-10-08','2027-01-16');
+assert.equal(rows[0].label,'2026-10-08');assert.equal(rows[1].amount,90);assert.equal(rows.at(-1).label,'2027-01-16');assert.equal(rows.reduce((n,r)=>n+r.amount,0),90);
+rows=loanLedger([receipt('2026-10-15T00:00:00Z',900)],'weekly','2026-10-08','2026-12-17');
+assert.equal(rows.length,10);assert.equal(rows[0].label,'Week 1 · 2026-10-08 – 2026-10-14');assert.equal(rows[1].amount,900);
+rows=loanLedger([receipt('2027-01-09T00:00:00Z',750)],'yearly','2026-10-08','2027-10-08');
+assert.equal(rows.length,12);assert.equal(rows[0].label,'Month 1 · 2026-10-08 – 2026-11-07');assert.equal(rows[3].amount,750);
+rows=loanLedger([],'monthly','2028-01-31','2029-01-31');assert.equal(rows.length,12);assert.equal(rows[1].label,'Month 2 · 2028-02-29 – 2028-03-30');
+assert.deepEqual(loanLedger([],'daily','',''),[]);
+console.log('PASS: loan-start daily/weekly/monthly ledgers, year crossing, leap dates, IST receipts and totals.');

@@ -5,8 +5,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 type Notice = { id:string; title:string; detail:string; target:string };
 type Loan = {id:string;status:string;balance:number;next_due_date:string;customer_name:string};
 type Receipt = {id:string;collected_at:number;amount:number;customer_name:string};
-export function Notifications({userId,role,navigate}:{userId:string;role:string;navigate:(target:string)=>void}) {
-  const [open,setOpen]=useState(false),[items,setItems]=useState<Notice[]>([]),[read,setRead]=useState<string[]>([]);
+export function Notifications({userId,role,autoOpen=false,navigate}:{userId:string;role:string;autoOpen?:boolean;navigate:(target:string)=>void}) {
+  const [open,setOpen]=useState(role==='agent'&&autoOpen),[items,setItems]=useState<Notice[]>([]),[read,setRead]=useState<string[]>([]);
   const [error,setError]=useState(''),[loading,setLoading]=useState(true),[retry,setRetry]=useState(0);
   const key='rmv-notifications-read:'+userId;
   useEffect(()=>{try{const saved=JSON.parse(localStorage.getItem(key)||'[]');setRead(Array.isArray(saved)?saved.filter(id=>typeof id==='string'):[])}catch{setRead([])}},[key]);
@@ -23,7 +23,7 @@ export function Notifications({userId,role,navigate}:{userId:string;role:string;
         const due:Notice[]=(data.loans as Loan[]).filter(l=>!['closed','foreclosed'].includes(l.status)&&l.balance>0&&l.next_due_date&&l.next_due_date<=today).sort((a,b)=>a.next_due_date.localeCompare(b.next_due_date)).map(l=>({
           id:'due:'+l.id+':'+l.next_due_date+':'+(l.next_due_date<today?'overdue':'today')+':'+l.balance,
           title:(l.next_due_date<today?'Overdue loan':'Loan due today')+' · '+l.customer_name,
-          detail:l.id+' · Due '+l.next_due_date+' · Outstanding '+money(l.balance),
+          detail:(role==='agent'?'':l.id+' · ')+'Due '+l.next_due_date+' · Outstanding '+money(l.balance),
           target:(role==='admin'||role==='manager')?'Loans':role==='agent'?'Assigned customers':'My loan'
         }));
         const receipts:Notice[]=(data.collections as Receipt[]).filter(r=>r.collected_at*1000>=Date.now()-7*86400000).sort((a,b)=>b.collected_at-a.collected_at).map(r=>({
@@ -31,7 +31,26 @@ export function Notifications({userId,role,navigate}:{userId:string;role:string;
           detail:r.id+' · '+money(r.amount)+' · '+new Date(r.collected_at*1000).toLocaleDateString('en-IN'),
           target:role==='customer'?'Repayments':'Collections'
         }));
-        if(active&&version===current){setItems([...due,...receipts]);setError('')}
+        const approvals:Notice[]=[];const failures:string[]=[];
+        if(role==='agent')await Promise.all(['loan','customer'].map(async kind=>{
+          try{
+            let page=0,more=true;
+            while(more){
+              const r=await fetch('/api/'+kind+'-requests?page='+page,{cache:'no-store',signal:AbortSignal.timeout(15000)});
+              if(r.status===403)return;
+              if(!r.ok)throw new Error('Could not load '+kind+' approval updates.');
+              const d=await r.json();
+              for(const row of d.requests){
+                if(!['pending','approved','rejected'].includes(row.status))continue;
+                approvals.push({id:kind+':'+row.id+':'+row.status,title:(kind==='loan'?'Loan':'Customer')+' request · '+row.status,
+                  detail:'Submitted '+new Date(row.created_at*1000).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})+(row.reviewed_at?' · Reviewed '+new Date(row.reviewed_at*1000).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):' · Awaiting Admin Manager approval'),
+                  target:kind==='loan'?'Customer/Loans':'Assigned customers'});
+              }
+              more=d.hasMore;page++;if(!active||version!==current)return;
+            }
+          }catch(e){failures.push(e instanceof Error?e.message:'Approval updates unavailable')}
+        }));
+        if(active&&version===current){setItems([...due,...approvals,...receipts]);setError(failures.join(' '))}
       }catch(err){if(active&&version===current){setError(err instanceof Error?err.message:'Unable to load notifications');setItems([])}}
       finally{if(active&&version===current)setLoading(false)}
     };
@@ -44,9 +63,10 @@ export function Notifications({userId,role,navigate}:{userId:string;role:string;
   const unread=items.filter(item=>!read.includes(item.id)).length;
   return <>
     <button onClick={()=>{setOpen(true);setRetry(v=>v+1)}} aria-label={'Notifications, '+unread+' unread'} aria-haspopup="dialog" className="relative grid size-9 place-items-center rounded-xl border border-[#dce5e0] bg-white"><Bell className="size-4"/>{unread>0&&<span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-[#df573e] px-1 text-[10px] font-bold text-white">{unread>99?'99+':unread}</span>}</button>
-    <Dialog open={open} onOpenChange={setOpen}><DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>Notifications</DialogTitle><DialogDescription>Due and overdue loans, plus payments from the last 7 days. Read status is saved on this browser.</DialogDescription></DialogHeader>
+    <Dialog open={open} onOpenChange={setOpen}><DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>Notifications</DialogTitle><DialogDescription>Due and overdue loans, approval statuses, and payments from the last 7 days. Read status is saved on this browser.</DialogDescription></DialogHeader>
+      {error&&<p role="alert" className="text-sm text-red-700">{error}</p>}
       <div className="flex justify-between gap-3 text-sm"><button onClick={()=>{setLoading(true);setRetry(v=>v+1)}} className="font-semibold text-[#176447]">Refresh</button><button disabled={!unread} onClick={()=>markRead(items.map(item=>item.id))} className="font-semibold text-[#176447] disabled:opacity-40">Mark all as read</button></div>
-      <div className="max-h-[55vh] space-y-2 overflow-y-auto" aria-live="polite">{loading?<p className="py-6 text-center text-sm">Loading notifications…</p>:error?<p role="alert" className="rounded-xl bg-red-50 p-4 text-sm text-red-700">{error}</p>:items.length===0?<p className="py-6 text-center text-sm">You’re all caught up. No notifications right now.</p>:items.map(item=><button key={item.id} onClick={()=>{markRead([item.id]);setOpen(false);navigate(item.target)}} className={'block w-full rounded-xl border p-3 text-left '+(read.includes(item.id)?'border-[#e3ebe7] bg-white':'border-[#b9d8c9] bg-[#eef7f1]')}><span className="block text-sm font-semibold">{!read.includes(item.id)&&<span aria-label="Unread" className="mr-2 inline-block size-2 rounded-full bg-[#df573e]"/>}{item.title}</span><span className="mt-1 block text-xs text-[#62766e]">{item.detail}</span></button>)}</div>
+      <div className="max-h-[55vh] space-y-2 overflow-y-auto" aria-live="polite">{loading?<p className="py-6 text-center text-sm">Loading notifications…</p>:items.length===0?<p className="py-6 text-center text-sm">You’re all caught up. No notifications right now.</p>:items.map(item=><button key={item.id} onClick={()=>{markRead([item.id]);setOpen(false);navigate(item.target)}} className={'block w-full rounded-xl border p-3 text-left '+(read.includes(item.id)?'border-[#e3ebe7] bg-white':'border-[#b9d8c9] bg-[#eef7f1]')}><span className="block text-sm font-semibold">{!read.includes(item.id)&&<span aria-label="Unread" className="mr-2 inline-block size-2 rounded-full bg-[#df573e]"/>}{item.title}</span><span className="mt-1 block text-xs text-[#62766e]">{item.detail}</span></button>)}</div>
     </DialogContent></Dialog>
   </>;
 }

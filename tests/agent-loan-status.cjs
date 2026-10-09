@@ -1,0 +1,15 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),Module=require('node:module'),ts=require('typescript');
+Module._extensions['.ts']=function(mod,file){mod._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file)};
+const {agentLoanStatus}=require('../lib/agent-loan-status.ts');
+const loan={status:'active',balance:8910,next_due_date:'2026-10-09'},today='2026-10-09';
+assert.match(agentLoanStatus(loan,today).className,/orange/);
+assert.equal(agentLoanStatus({...loan,next_due_date:'2026-10-08'},today).className,'status-red');
+assert.equal(agentLoanStatus({...loan,balance:0,status:'closed'},today).className,'status-green');
+assert.equal(agentLoanStatus({...loan,balance:0,status:'closed'},today).collectable,false);
+assert.equal(agentLoanStatus({...loan,balance:0,status:'foreclosed'},today).label,'Foreclosed');
+assert.equal(agentLoanStatus({...loan,next_due_date:'2026-10-10'},today).label,'Upcoming · 10 Oct 2026');
+assert.equal(agentLoanStatus(loan,today).label,'Due today · 09 Oct 2026');
+assert.equal(agentLoanStatus({...loan,next_payment_date:'2026-06-13'},today).label,'Overdue since · 13 Jun 2026');
+assert.equal(agentLoanStatus({...loan,next_payment_date:null},today).collectable,false);
+assert.equal(agentLoanStatus({...loan,next_due_date:''},today).collectable,false);
+console.log('PASS: due orange, overdue red, fully paid green, partial payment not paid, foreclosure distinct.');

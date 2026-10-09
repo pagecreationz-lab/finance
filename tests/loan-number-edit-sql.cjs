@@ -1,0 +1,22 @@
+const {PGlite}=require(process.argv[2]),fs=require('node:fs'),assert=require('node:assert/strict');
+(async()=>{const db=new PGlite();try{
+ await db.exec(`create role anon;create role authenticated;create role service_role;
+ create table users(id text primary key,role text);insert into users values('admin','admin'),('manager','manager');
+ create table loans(id text primary key,balance bigint);insert into loans values('OLD',9000),('OTHER',100);
+ create table collections(id text primary key,loan_id text references loans(id),amount bigint);insert into collections values('receipt','OLD',90);
+ create table loan_requests(id text primary key,loan_number text,status text);insert into loan_requests values('request','RESERVED','pending');
+ create table audit_logs(id text primary key,actor_id text,actor_role text,entity_id text,metadata jsonb);
+ grant all on all tables in schema public to service_role;`);
+ await db.exec(fs.readFileSync('supabase/migrations/20261009132517_editable_loan_number.sql','utf8'));
+ await db.exec('set role service_role');
+ const rename=(number,actor='admin')=>db.query('select rmv_rename_loan_number($1,$2,$3::jsonb)',['OLD',number,JSON.stringify({id:crypto.randomUUID(),actor_id:actor,actor_role:actor})]);
+ await assert.rejects(rename('NEW','manager'),/Super admin/);await assert.rejects(rename('OTHER'),/already in use/);await assert.rejects(rename('RESERVED'),/awaiting approval/);await assert.rejects(rename('bad number'),/Invalid/);
+ await rename('new');
+ assert.equal((await db.query("select loan_number from loans where id='OLD'")).rows[0].loan_number,'NEW');assert.equal(Number((await db.query("select balance from loans where id='OLD'")).rows[0].balance),9000);
+ assert.equal((await db.query('select loan_id from collections')).rows[0].loan_id,'OLD');
+ assert.equal((await db.query('select metadata from audit_logs')).rows[0].metadata.previous_loan_number,'OLD');
+ await assert.rejects(db.exec("insert into loans values('NEW',100,null)"),/already in use/);
+ await assert.rejects(db.exec("insert into loan_requests values('second','NEW','pending')"),/already in use/);
+ await db.exec('reset role;set role anon');await assert.rejects(rename('DENIED'));
+ console.log('PASS: database rename, role restrictions, duplicate/pending reservations, creation guards, preserved references and audit.');
+ }finally{await db.close()}})().catch(e=>{console.error(e);process.exitCode=1});

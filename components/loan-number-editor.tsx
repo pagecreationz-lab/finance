@@ -1,0 +1,6 @@
+'use client';
+import {useState} from 'react';
+export function LoanNumberEditor({id,number,onSaved}:{id:string;number:string;onSaved:()=>void}){
+ const [value,setValue]=useState(number),[busy,setBusy]=useState(false),[message,setMessage]=useState('');
+ return <div className="my-3 rounded-xl border p-3"><label className="text-sm font-semibold">Loan number<input aria-label="Edit loan number" maxLength={40} value={value} disabled={busy} onChange={e=>setValue(e.target.value.toUpperCase())} className="ml-3 rounded border p-2"/></label><button type="button" disabled={busy||!value.trim()||value.trim()===number} className="ml-3 rounded border px-3 py-2 text-sm disabled:opacity-40" onClick={async()=>{setBusy(true);setMessage('');try{const r=await fetch('/api/loan-number',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,loan_number:value})}),d=await r.json();if(!r.ok)throw new Error(d.error);setValue(d.loan_number);setMessage('Loan number updated.');onSaved();window.dispatchEvent(new Event('fundflow-data'))}catch(e){setMessage(e instanceof Error?e.message:'Update failed')}finally{setBusy(false)}}}>{busy?'Saving…':'Save loan number'}</button>{message&&<p role="status" className="mt-2 text-sm">{message}</p>}</div>;
+}

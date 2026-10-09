@@ -3,6 +3,7 @@ import {AuthError} from '@/lib/auth';
 import {hasSupabaseConfig,getSupabaseAdmin} from '@/lib/supabase-admin';
 import {readLocalStore,mutateLocalStore} from '@/lib/local-data-store';
 import {loanInput,mutateLoanRequest,loanRequestSummary,type LoanRequest} from '@/lib/loan-requests';
+import {loanNumber} from '@/lib/loan-number';
 export const dynamic='force-dynamic';
 const fail=(e:unknown)=>Response.json({error:e instanceof Error?e.message:'Loan request failed'},{status:e instanceof AuthError?e.status:400});
 async function authorize(request:Request){
@@ -21,7 +22,13 @@ export async function POST(request:Request){try{
  const session=await authorize(request),origin=request.headers.get('origin');if(origin&&origin!==new URL(request.url).origin)throw new AuthError('Invalid origin',403);
  const body=await request.json();if(!['submit','approve','reject'].includes(body.action)||typeof body.id!=='string'||! /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.id))throw new Error('Invalid loan request');
  if((body.action==='submit'&&session.role!=='agent')||(body.action!=='submit'&&session.role==='agent'))throw new AuthError('Action not permitted for this role',403);
- const payload:Record<string,unknown>=body.action==='submit'?{action:body.action,id:body.id,...loanInput(body)}:{action:body.action,id:body.id,reason:String(body.reason||'').trim()};
+ const payload:Record<string,unknown>=body.action==='submit'?{action:body.action,id:body.id,...loanInput(body),loan_number:loanNumber(body.loan_number)}:{action:body.action,id:body.id,reason:String(body.reason||'').trim()};
+ let combined=Boolean(payload.new_customer);
+ if(body.action!=='submit'){
+   if(!hasSupabaseConfig())combined=Boolean((await readLocalStore()).loan_requests?.find(r=>r.id===body.id)?.new_customer);
+   else{const r=await getSupabaseAdmin().from('loan_requests').select('new_customer').eq('id',body.id).single();if(r.error)throw new Error('Combined approval migration is required.');combined=Boolean(r.data.new_customer);}
+ }
+ if(combined){const {permissions}=await access(request);requirePermission(permissions,session.role==='agent'?'submit_customer':'approve_customer');}
  if(body.action!=='submit'&&String(payload.reason).length>1000)throw new Error('Review reason must be at most 1,000 characters');
  let result:LoanRequest;
  if(!hasSupabaseConfig())result=await mutateLocalStore(data=>mutateLoanRequest(data,payload,session));

@@ -1,6 +1,8 @@
 import { access, requirePermission, actionPermission } from '@/lib/rbac';
 import { validSignature, validDate } from '@/lib/collection-records';
-import {loanSummary,flatInterest,installmentDates,refreshFlatLoan} from '@/lib/loan-calculation';
+import {loanNumber} from '@/lib/loan-number';
+import {UPFRONT_MODEL,upfrontTerms,upfrontInterest} from '@/lib/upfront-loan';
+import {loanSummary,flatInterest,installmentDates,refreshFlatLoan,exactCollectionAmount} from '@/lib/loan-calculation';
 import { getSupabaseAdmin, hasSupabaseConfig } from '@/lib/supabase-admin';
 import { AuthError, hashPassword, requireAdmin, requireSession, type AppSession } from '@/lib/auth';
 import { mutateLocalStore, readLocalStore, type LocalFinanceData, type StoredAuditLog, type StoredCollection, type StoredLoan, type StoredUser } from '@/lib/local-data-store';
@@ -86,6 +88,10 @@ async function localAction(body:Record<string,unknown>,session:AppSession) {
       if(!loanId||!Number.isSafeInteger(amount)||amount<=0)throw new ApiError('Loan and valid collection amount are required');
       if(!loan)throw new ApiError('Loan not found',404);if(session.role==='agent'&&!data.users.some(user=>user.id===loan.customer_id&&user.assigned_agent_id===session.id))throw new AuthError('This customer is not assigned to you',403);
       if(['closed','foreclosed'].includes(loan.status))throw new ApiError('Loan is closed');if(amount>n(loan.balance))throw new ApiError('Collection cannot exceed the outstanding balance');
+      if(session.role==='agent'){
+        let expected:number;try{expected=exactCollectionAmount(loan)}catch(error){throw new ApiError(error instanceof Error?error.message:'Invalid loan schedule')}
+        if(amount!==expected)throw new ApiError(`Collect exactly ₹${expected} for the next installment. Refresh the loan before retrying.`);
+      }
       data.collections.unshift({id:String(body._entity_id),loan_id:loanId,agent_id:session.role==='agent'?session.id:null,collected_by_name:session.name,amount,method:String(body.method||'Cash'),proof_file_key:String(body.proof_file_key||'')||null,remarks:String(body.remarks||'')||null,collected_at:now,customer_signature:validSignature(body.customer_signature)?body.customer_signature:null,signature_at:validSignature(body.customer_signature)?now:null});
       loan.balance=n(loan.balance)-amount;if(loan.balance<=0)loan.status='closed';
     } else if(action==='foreclose_loan'){
@@ -145,7 +151,7 @@ export async function GET(request:Request){
 export async function POST(request:Request){
   try{
     const {session,permissions}=await access(request);const body=await request.json() as Record<string,unknown>,action=String(body.action||'');
-    if(action==='create_customer')body._entity_id='customer-'+crypto.randomUUID();else if(action==='create_loan')body._entity_id='LN-'+crypto.randomUUID().slice(0,8).toUpperCase();else if(action==='create_collection')body._entity_id='RC-'+crypto.randomUUID().slice(0,8).toUpperCase();else if(action==='create_agent')body._entity_id='agent-'+crypto.randomUUID();
+    if(action==='create_customer')body._entity_id='customer-'+crypto.randomUUID();else if(action==='create_loan')body._entity_id=String(body.loan_number||'');else if(action==='create_collection')body._entity_id='RC-'+crypto.randomUUID().slice(0,8).toUpperCase();else if(action==='create_agent')body._entity_id='agent-'+crypto.randomUUID();
     const adminActions=new Set(['create_customer','update_customer','delete_customers','assign_customer','create_loan','update_loan','foreclose_loan','reopen_loan','delete_agent','create_agent','update_agent']);
     if(actionPermission[action])requirePermission(permissions,actionPermission[action]);else if(adminActions.has(action)||action==='update_collection')requireAdmin(session);
     if(!adminActions.has(action)&&!['create_collection','update_collection'].includes(action))throw new AuthError('This role cannot perform that action',403);
@@ -161,16 +167,20 @@ export async function POST(request:Request){
         else{const existing=await getSupabaseAdmin().from('loans').select('*').eq('id',String(body.id)).single();ok(existing.error);oldLoan=existing.data as StoredLoan}
         if(!oldLoan)throw new ApiError('Loan not found',404);start=oldLoan.given_date;
       }
-      if(!validDate(start)||!validDate(body.end_date)||!validDate(body.next_due_date)||body.end_date<start||body.next_due_date<start||body.next_due_date>body.end_date)throw new ApiError('Valid start, due and end dates are required. Due date must be between start and end dates.');
+      if(action==='create_loan'||oldLoan?.interest_model===UPFRONT_MODEL){
+        try{const terms=upfrontTerms(String(start),String(body.repayment_frequency||oldLoan?.repayment_frequency||'yearly'));body.repayment_frequency=terms.repayment_frequency;body.end_date=terms.end_date;body.next_due_date=action==='create_loan'?terms.first_due_date:oldLoan!.next_due_date;upfrontInterest(oldLoan?.principal??Number(body.principal),Number(body.interest_rate??0));}catch(e){throw new ApiError(e instanceof Error?e.message:'Invalid loan terms')}
+      }
+      if(!validDate(start)||!validDate(body.end_date)||!validDate(body.next_due_date)||body.end_date<start||body.next_due_date<start||(oldLoan?.interest_model!==UPFRONT_MODEL&&body.next_due_date>body.end_date))throw new ApiError('Valid start, due and end dates are required. Due date must be between start and end dates.');
       try{
+        if(action==='create_loan')body._entity_id=loanNumber(body.loan_number);
         flatInterest(oldLoan?.principal??Number(body.principal),Number(body.interest_rate??0));
-        installmentDates(body.next_due_date,body.end_date,String(body.repayment_frequency||oldLoan?.repayment_frequency||'monthly'));
+        if(oldLoan?.interest_model!==UPFRONT_MODEL)installmentDates(body.next_due_date,body.end_date,String(body.repayment_frequency||oldLoan?.repayment_frequency||'yearly'));
         if(action==='create_loan'&&String(body.interest_type||'fixed')!=='fixed')throw new Error('New loans use flat interest on original principal for the entire term.');
         if(oldLoan)refreshFlatLoan({...oldLoan,interest_rate:Number(body.interest_rate),end_date:body.end_date,next_due_date:body.next_due_date,repayment_frequency:String(body.repayment_frequency||oldLoan.repayment_frequency)},oldLoan);
       }catch(error){throw new ApiError(error instanceof Error?error.message:'Invalid loan terms')}
     }
     if(action==='create_collection'){
-      if(session.role==='agent'&&!validSignature(body.customer_signature))throw new ApiError('Customer signature is required for agent collections.');
+
       if(body.customer_signature!=null&&!validSignature(body.customer_signature))throw new ApiError('Invalid customer signature. Please sign again.');
       body.agent_id=session.id;
     }
