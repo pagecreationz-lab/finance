@@ -1,5 +1,7 @@
 # Upfront interest and default loan terms
 
+SUPERSEDED: See PRINCIPAL_REPAYMENT_SETUP.md. Current loans collect the full principal, not principal minus interest. This document describes the historical net model and migration prerequisites only.
+
 The current lending rule replaces the previous flat-interest-added model for new loans. The interest rate varies per loan (0% to less than 100%, up to four decimal places).
 
 - Interest deducted = lending amount × rate / 100, rounded to the nearest whole rupee.

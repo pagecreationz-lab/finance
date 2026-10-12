@@ -1,6 +1,7 @@
 import {validDate} from './collection-records';
 import type {CalculatedLoan} from './loan-calculation';
-export const UPFRONT_MODEL='upfront_net_v1';
+export const UPFRONT_MODEL='upfront_principal_v2';
+export const isUpfrontModel=(model?:string|null)=>model===UPFRONT_MODEL||model==='upfront_net_v1';
 export function upfrontInterest(principal:number,rate:number){
  if(!Number.isSafeInteger(principal)||principal<=0||!Number.isFinite(rate)||rate<0||rate>=100||Math.abs(rate*10000-Math.round(rate*10000))>0.000001)throw new Error('Enter a whole-rupee lending amount and interest from 0 to below 100%, with at most four decimal places.');
  const interest=Number((BigInt(principal)*BigInt(Math.round(rate*10000))+BigInt(500000))/BigInt(1000000));
@@ -19,7 +20,7 @@ export function upfrontTerms(start:string,frequency:string){
  return {repayment_frequency:basis,first_due_date:dates[0],end_date:dates[dates.length-1],dates};
 }
 export function upfrontCalculation(loan:CalculatedLoan,today=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Kolkata',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date())){
- const interest=upfrontInterest(Number(loan.principal),Number(loan.interest_rate)),total=Number(loan.principal)-interest;
+ const interest=upfrontInterest(Number(loan.principal),Number(loan.interest_rate)),total=Number(loan.principal)-(loan.interest_model==='upfront_net_v1'?interest:0);
  const terms=upfrontTerms(loan.given_date,loan.repayment_frequency),count=terms.dates.length,base=Math.floor(total/count),extra=total%count;
  const paid=Math.max(0,total-Number(loan.balance));let cumulative=0;
  const schedule=terms.dates.map((date,i)=>{const amount=base+(i<extra?1:0),applied=Math.min(amount,Math.max(0,paid-cumulative));cumulative+=amount;return {date,amount,paid:applied,due:amount-applied}});
@@ -30,8 +31,9 @@ export function refreshUpfrontLoan(loan:CalculatedLoan,previous?:CalculatedLoan)
  if(previous&&['closed','foreclosed'].includes(previous.status)&&(loan.principal!==previous.principal||loan.interest_rate!==previous.interest_rate||loan.given_date!==previous.given_date||loan.repayment_frequency!==previous.repayment_frequency))throw new Error('Settled loan terms cannot be changed.');
  if(loan.interest_type!=='fixed')throw new Error('Upfront interest loans require a fixed deduction rate.');
  const interest=upfrontInterest(loan.principal,loan.interest_rate),terms=upfrontTerms(loan.given_date,loan.repayment_frequency);
- if(previous?.interest_model===UPFRONT_MODEL)loan.balance+=(loan.principal-interest)-(previous.principal-Number(previous.interest_amount||0));
- if(loan.balance<0||loan.balance>loan.principal-interest)throw new Error('Revised repayable amount cannot be below existing credits or below the balance.');
+ const total=loan.principal-(loan.interest_model==='upfront_net_v1'?interest:0);
+ if(previous&&isUpfrontModel(previous.interest_model))loan.balance+=total-(previous.principal-(previous.interest_model==='upfront_net_v1'?Number(previous.interest_amount||0):0));
+ if(loan.balance<0||loan.balance>total)throw new Error('Revised repayable amount cannot be below existing credits or below the balance.');
  Object.assign(loan,{interest_amount:interest,repayment_frequency:terms.repayment_frequency,first_due_date:terms.first_due_date,end_date:terms.end_date});
  if(loan.status==='foreclosed')return;
  const calc=upfrontCalculation({...loan,status:'active'});
@@ -42,14 +44,14 @@ export function refreshUpfrontLoan(loan:CalculatedLoan,previous?:CalculatedLoan)
 export function initializeUpfrontLoan<T extends CalculatedLoan>(loan:T):T{
  const interest=upfrontInterest(loan.principal,loan.interest_rate);
  if(loan.balance!==loan.principal)throw new Error('New loans must start with an untouched lending amount.');
- loan.interest_model=UPFRONT_MODEL;loan.balance=loan.principal-interest;refreshUpfrontLoan(loan);return loan;
+ loan.interest_model=UPFRONT_MODEL;loan.balance=loan.principal;refreshUpfrontLoan(loan);return loan;
 }
 export function migrateUpfrontLoan(loan:CalculatedLoan){
  if(loan.interest_model===UPFRONT_MODEL||!['active','overdue'].includes(loan.status)||loan.interest_type!=='fixed')return false;
  try{
   const interest=upfrontInterest(loan.principal,loan.interest_rate);
-  const oldTotal=loan.principal+(loan.interest_model==='flat_term_v1'?Number(loan.interest_amount||0):0),credits=oldTotal-loan.balance;
-  if(credits<0||credits>loan.principal-interest)return false;
-  const copy={...loan,interest_model:UPFRONT_MODEL,balance:loan.principal-interest-credits};refreshUpfrontLoan(copy);Object.assign(loan,copy);return true;
+  const oldTotal=loan.principal+(loan.interest_model==='flat_term_v1'?Number(loan.interest_amount||0):loan.interest_model==='upfront_net_v1'?-Number(loan.interest_amount??interest):0),credits=oldTotal-loan.balance;
+  if(credits<0||credits>loan.principal)return false;
+  const copy={...loan,interest_model:UPFRONT_MODEL,balance:loan.principal-credits};refreshUpfrontLoan(copy);Object.assign(loan,copy);return true;
  }catch{return false}
 }

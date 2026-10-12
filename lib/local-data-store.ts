@@ -6,9 +6,9 @@ import type { ReminderStore } from './reminder-types';
 
 export type StoredUser = { id:string; name:string; phone:string; email:string|null; role:string; assigned_agent_id:string|null; created_at:number; occupation?:string|null; username?:string|null; password_hash?:string|null };
 export type StoredLoan = { loan_number?:string|null; interest_model?:string|null; interest_amount?:number|null; first_due_date?:string|null; id:string; customer_id:string; principal:number; balance:number; interest_type:string; interest_rate:number; repayment_frequency:string; end_date?:string|null; given_date:string; next_due_date:string; security_type:string; security_file_key:string|null; remarks:string|null; status:string; foreclosed_at?:number|null; foreclosure_amount?:number|null; foreclosure_waived?:number|null; foreclosure_proof_file_key?:string|null; foreclosure_remarks?:string|null; foreclosed_by?:string|null; reopened_at?:number|null; reopen_reason?:string|null; reopened_by?:string|null };
-export type StoredCollection = { customer_signature?:number[][][]|null; signature_at?:number|null; id:string; loan_id:string; agent_id:string|null; collected_by_name?:string; amount:number; method:string; proof_file_key:string|null; remarks:string|null; collected_at:number };
+export type StoredCollection = { penalty_amount?:number; customer_signature?:number[][][]|null; signature_at?:number|null; id:string; loan_id:string; agent_id:string|null; collected_by_name?:string; amount:number; method:string; proof_file_key:string|null; remarks:string|null; collected_at:number };
 export type StoredAuditLog = { id:string; actor_id:string; actor_name:string; actor_role:string; action:string; entity_type:string; entity_id:string|null; summary:string; metadata:Record<string,unknown>; created_at:number };
-export type LocalFinanceData = { loan_requests?:import('./loan-requests').LoanRequest[]; customer_requests?:import('./customer-requests').CustomerRequest[]; receipt_corrections?:import('./receipt-corrections').ReceiptCorrection[]; role_permissions?:import("./permissions").Policy; users:StoredUser[]; loans:StoredLoan[]; collections:StoredCollection[]; audit_logs:StoredAuditLog[]; reminders?:ReminderStore };
+export type LocalFinanceData = { penalty_requests?:import('./penalties').PenaltyRequest[]; loan_requests?:import('./loan-requests').LoanRequest[]; customer_requests?:import('./customer-requests').CustomerRequest[]; receipt_corrections?:import('./receipt-corrections').ReceiptCorrection[]; role_permissions?:import("./permissions").Policy; users:StoredUser[]; loans:StoredLoan[]; collections:StoredCollection[]; audit_logs:StoredAuditLog[]; reminders?:ReminderStore };
 
 const dataPath = () => process.env.FUNDFLOW_LOCAL_DATA_PATH || path.join(process.cwd(), '.local-data', 'fundflow.json');
 const agentHash='scrypt$192c4da34ba6bff377e0787211fdb553$6f237eaf810fe835719eb335f5592047ff4224fb3ac2ab0e29149a5e2c74b1ed1022d569ed8c1d4c8734b2f1f5bd73af7dff0400d0244398b0b47bc8c4308d1d';
@@ -40,8 +40,8 @@ function normalizeUsers(data:LocalFinanceData){
   data.audit_logs??=[];
   for(const loan of data.loans){
     const before=loan.balance;
-    if(loan.interest_model==='upfront_net_v1'&&loan.repayment_frequency==='daily'&&['active','overdue'].includes(loan.status))refreshFlatLoan(loan);
-    if(migrateUpfrontLoan(loan))data.audit_logs.push({id:'LOG-upfront-'+loan.id,actor_id:'system',actor_name:'Loan calculation migration',actor_role:'admin',action:'loan_calculation_migrated',entity_type:'loan',entity_id:loan.id,summary:'Applied upfront deduction and default term, preserving credits',metadata:{previous_balance:before,balance:loan.balance,interest_amount:loan.interest_amount},created_at:Math.floor(Date.now()/1000)});
+    if(['upfront_net_v1','upfront_principal_v2'].includes(loan.interest_model||'')&&loan.repayment_frequency==='daily'&&['active','overdue'].includes(loan.status))refreshFlatLoan(loan);
+    if(migrateUpfrontLoan(loan))data.audit_logs.push({id:'LOG-principal-v2-'+loan.id,actor_id:'system',actor_name:'Loan calculation migration',actor_role:'admin',action:'loan_calculation_migrated',entity_type:'loan',entity_id:loan.id,summary:'Applied full-principal repayment, preserving credits',metadata:{previous_balance:before,balance:loan.balance,interest_amount:loan.interest_amount},created_at:Math.floor(Date.now()/1000)});
   }
   const usernames:Record<string,string>={'agent-deepak':'deepak','agent-meera':'meera','agent-akash':'akash','customer-arjun':'arjun','customer-priya':'priya','customer-ravi':'ravi','customer-neha':'neha'};
   for(const user of data.users){
@@ -73,8 +73,20 @@ export function mutateLocalStore<T>(mutator:(data:LocalFinanceData)=>T|Promise<T
     const data = await readLocalStore();
     const previousLogs = new Map(data.audit_logs.map(log=>[log.id,JSON.stringify(log)]));
     const previousCorrections=structuredClone(data.receipt_corrections||[]);
+    const previousPenalties=structuredClone(data.penalty_requests||[]);
+    const protectedReceipts=new Map(data.collections.filter(r=>Number(r.penalty_amount)>0).map(r=>[r.id,JSON.stringify(r)]));
     const previousLoans=new Map(data.loans.map(loan=>[loan.id,structuredClone(loan)]));
     const result = await mutator(data);
+    for(const [id,value] of protectedReceipts)if(JSON.stringify(data.collections.find(r=>r.id===id))!==value)throw new Error('Penalty receipts are immutable; use receipt corrections.');
+    for(const p of previousPenalties){
+      const next=data.penalty_requests?.find(r=>r.id===p.id);
+      if(!next)throw new Error('Penalty history cannot be deleted.');
+      if(JSON.stringify(next)===JSON.stringify(p))continue;
+      const fields=p.status==='pending'?['status','reviewed_by','reviewed_name','reviewed_at']:p.status==='approved'?['status','receipt_id']:[];
+      if((p.status==='pending'&&!['approved','rejected'].includes(next.status))||(p.status==='approved'&&next.status!=='collected')||fields.length===0)throw new Error('Invalid penalty transition.');
+      for(const key of new Set([...Object.keys(p),...Object.keys(next)]))if(!fields.includes(key)&&JSON.stringify(p[key as keyof typeof p])!==JSON.stringify(next[key as keyof typeof next]))throw new Error('Penalty proposals are immutable.');
+    }
+    for(const loan of data.loans)if(['closed','foreclosed'].includes(loan.status)&&(data.penalty_requests||[]).some(p=>p.loan_id===loan.id&&p.status==='approved'))throw new Error('Collect approved penalties before closing the loan.');
     const loanNumbers=new Set<string>();
     for(const loan of data.loans){const key=(loan.loan_number||loan.id).toUpperCase();if(data.loans.some(other=>other.id!==loan.id&&other.id.toUpperCase()===key)||loanNumbers.has(key))throw new Error('Loan number is already in use.');loanNumbers.add(key);}
     for(const loan of data.loans){const previous=previousLoans.get(loan.id);if(previous)refreshFlatLoan(loan,previous);else initializeUpfrontLoan(loan);}

@@ -1,7 +1,8 @@
 import { access, requirePermission, actionPermission } from '@/lib/rbac';
 import { validSignature, validDate } from '@/lib/collection-records';
 import {loanNumber} from '@/lib/loan-number';
-import {UPFRONT_MODEL,upfrontTerms,upfrontInterest} from '@/lib/upfront-loan';
+import {approvedPenalty} from '@/lib/penalties';
+import {UPFRONT_MODEL,isUpfrontModel,upfrontTerms,upfrontInterest} from '@/lib/upfront-loan';
 import {loanSummary,flatInterest,installmentDates,refreshFlatLoan,exactCollectionAmount} from '@/lib/loan-calculation';
 import { getSupabaseAdmin, hasSupabaseConfig } from '@/lib/supabase-admin';
 import { AuthError, hashPassword, requireAdmin, requireSession, type AppSession } from '@/lib/auth';
@@ -24,7 +25,7 @@ const fail=(error:unknown)=>{
   return Response.json({error:message},{status});
 };
 
-function snapshot(users:StoredUser[], loanRows:StoredLoan[], collectionRows:StoredCollection[], auditRows:StoredAuditLog[] = []) {
+function snapshot(users:StoredUser[], loanRows:StoredLoan[], collectionRows:StoredCollection[], auditRows:StoredAuditLog[] = [], penalties:import('@/lib/penalties').PenaltyRequest[] = []) {
   const userById=new Map(users.map(user=>[user.id,user])),loanById=new Map(loanRows.map(loan=>[loan.id,loan]));
   const customers=users.filter(user=>user.role==='customer').map(user=>{
     const active=loanRows.filter(loan=>loan.customer_id===user.id&&!['closed','foreclosed'].includes(loan.status));
@@ -32,9 +33,9 @@ function snapshot(users:StoredUser[], loanRows:StoredLoan[], collectionRows:Stor
   });
   const loans=loanRows.map(loan=>{
     const customer=userById.get(loan.customer_id);
-    const receiptPaid=collectionRows.filter(item=>item.loan_id===loan.id).reduce((sum,item)=>sum+n(item.amount),0);
+    const receiptPaid=collectionRows.filter(item=>item.loan_id===loan.id).reduce((sum,item)=>sum+n(item.amount)-n(item.penalty_amount),0);
     const calculated=loanSummary(loan);
-    return {...loan,...calculated,customer_name:customer?.name||'Unknown customer',phone:customer?.phone||'',assigned_agent_id:customer?.assigned_agent_id||null,agent_name:customer?.assigned_agent_id?userById.get(customer.assigned_agent_id)?.name||null:null,paid:receiptPaid+(loan.status==='foreclosed'?n(loan.foreclosure_amount):0)};
+    return {...loan,...calculated,approved_penalty:approvedPenalty(penalties,loan.id),next_collection_amount:Number(('next_installment_due' in calculated?calculated.next_installment_due:0)||0)+approvedPenalty(penalties,loan.id),customer_name:customer?.name||'Unknown customer',phone:customer?.phone||'',assigned_agent_id:customer?.assigned_agent_id||null,agent_name:customer?.assigned_agent_id?userById.get(customer.assigned_agent_id)?.name||null:null,paid:receiptPaid+(loan.status==='foreclosed'?n(loan.foreclosure_amount):0)};
   });
   const collections=collectionRows.map(item=>{
     const loan=loanById.get(item.loan_id),customer=loan?userById.get(loan.customer_id):undefined;
@@ -87,14 +88,18 @@ async function localAction(body:Record<string,unknown>,session:AppSession) {
       const amount=Number(body.amount),loanId=String(body.loan_id||''),loan=data.loans.find(item=>item.id===loanId);
       if(!loanId||!Number.isSafeInteger(amount)||amount<=0)throw new ApiError('Loan and valid collection amount are required');
       if(!loan)throw new ApiError('Loan not found',404);if(session.role==='agent'&&!data.users.some(user=>user.id===loan.customer_id&&user.assigned_agent_id===session.id))throw new AuthError('This customer is not assigned to you',403);
-      if(['closed','foreclosed'].includes(loan.status))throw new ApiError('Loan is closed');if(amount>n(loan.balance))throw new ApiError('Collection cannot exceed the outstanding balance');
-      if(session.role==='agent'){
-        let expected:number;try{expected=exactCollectionAmount(loan)}catch(error){throw new ApiError(error instanceof Error?error.message:'Invalid loan schedule')}
+      const penalty=approvedPenalty(data.penalty_requests,loanId);
+      if(['closed','foreclosed'].includes(loan.status))throw new ApiError('Loan is closed');if(amount>n(loan.balance)+penalty)throw new ApiError('Collection cannot exceed the outstanding balance plus approved penalties');
+      if(session.role==='agent'||penalty>0){
+        let expected:number;try{expected=exactCollectionAmount(loan)+penalty}catch(error){throw new ApiError(error instanceof Error?error.message:'Invalid loan schedule')}
         if(amount!==expected)throw new ApiError(`Collect exactly ₹${expected} for the next installment. Refresh the loan before retrying.`);
       }
-      data.collections.unshift({id:String(body._entity_id),loan_id:loanId,agent_id:session.role==='agent'?session.id:null,collected_by_name:session.name,amount,method:String(body.method||'Cash'),proof_file_key:String(body.proof_file_key||'')||null,remarks:String(body.remarks||'')||null,collected_at:now,customer_signature:validSignature(body.customer_signature)?body.customer_signature:null,signature_at:validSignature(body.customer_signature)?now:null});
-      loan.balance=n(loan.balance)-amount;if(loan.balance<=0)loan.status='closed';
+      data.collections.unshift({id:String(body._entity_id),loan_id:loanId,agent_id:session.role==='agent'?session.id:null,collected_by_name:session.name,amount,penalty_amount:penalty,method:String(body.method||'Cash'),proof_file_key:String(body.proof_file_key||'')||null,remarks:String(body.remarks||'')||null,collected_at:now,customer_signature:validSignature(body.customer_signature)?body.customer_signature:null,signature_at:validSignature(body.customer_signature)?now:null});
+      for(const p of data.penalty_requests||[])if(p.loan_id===loanId&&p.status==='approved'){p.status='collected';p.receipt_id=String(body._entity_id);}
+      body.penalty_amount=penalty;body.installment_amount=amount-penalty;
+      loan.balance=n(loan.balance)-(amount-penalty);if(loan.balance<=0)loan.status='closed';
     } else if(action==='foreclose_loan'){
+      if((data.penalty_requests||[]).some(p=>p.loan_id===body.id&&['pending','approved'].includes(p.status)))throw new ApiError('Resolve pending penalties and collect approved penalties before foreclosure.');
       const loan=data.loans.find(item=>item.id===String(body.id));if(!loan)throw new ApiError('Loan not found',404);if(loan.status==='closed'||loan.status==='foreclosed')throw new ApiError('Only an open loan can be foreclosed');
       const originalBalance=n(loan.balance),amount=Number(body.amount),remarks=String(body.remarks||'').trim();if(!Number.isFinite(amount)||!Number.isInteger(amount)||amount<0||amount>originalBalance)throw new ApiError('Settlement amount must be a whole-rupee value between zero and the outstanding balance');if(!remarks)throw new ApiError('Foreclosure remarks are required');
       body.waived_amount=originalBalance-amount;body.original_balance=originalBalance;loan.foreclosed_at=now;loan.foreclosure_amount=amount;loan.foreclosure_waived=originalBalance-amount;loan.foreclosure_proof_file_key=String(body.proof_file_key||'')||null;loan.foreclosure_remarks=remarks;loan.foreclosed_by=session.name;loan.reopened_at=null;loan.reopen_reason=null;loan.reopened_by=null;loan.balance=0;loan.status='foreclosed';
@@ -138,13 +143,13 @@ import {effectiveCollections} from '@/lib/receipt-corrections';
 export async function GET(request:Request){
   try{
     const {session,permissions}=await access(request);
-    if(useLocalStore(request)){const raw=await readLocalStore();const scoped=scopeRows({...raw,collections:effectiveCollections(raw.collections,raw.receipt_corrections)},session);return Response.json({...permittedSnapshot(snapshot(scoped.users,scoped.loans,scoped.collections,scoped.audit_logs),permissions,session.role),session},{headers:{'Cache-Control':'no-store','X-FundFlow-Storage':'local-file'}})}
+    if(useLocalStore(request)){const raw=await readLocalStore();const scoped=scopeRows({...raw,collections:effectiveCollections(raw.collections,raw.receipt_corrections)},session);return Response.json({...permittedSnapshot(snapshot(scoped.users,scoped.loans,scoped.collections,scoped.audit_logs,raw.penalty_requests),permissions,session.role),session},{headers:{'Cache-Control':'no-store','X-FundFlow-Storage':'local-file'}})}
     const db=getSupabaseAdmin();
-    const [ur,lr,cr]=await Promise.all([db.from('users').select('*').order('created_at',{ascending:true}),db.from('loans').select('*').order('given_date',{ascending:false}),db.from('collection_ledger').select('*').order('collected_at',{ascending:false})]);
-    ok(ur.error);ok(lr.error);ok(cr.error);
+    const [pr,ur,lr,cr]=await Promise.all([db.from('penalty_requests').select('*').eq('status','approved'),db.from('users').select('*').order('created_at',{ascending:true}),db.from('loans').select('*').order('given_date',{ascending:false}),db.from('collection_ledger').select('*').order('collected_at',{ascending:false})]);
+    ok(ur.error);ok(lr.error);ok(cr.error);if(pr.error)throw new Error('Apply the agent penalty approval migration before recording payments.');
     const ar=session.role==='admin'?await db.from('audit_logs').select('*').order('created_at',{ascending:false}).limit(2000):{data:[],error:null};ok(ar.error);
     const scoped=scopeRows({users:(ur.data||[]) as StoredUser[],loans:(lr.data||[]) as StoredLoan[],collections:(cr.data||[]).map(r=>({...r,original_amount:r.amount,amount:r.effective_amount})) as StoredCollection[],audit_logs:(ar.data||[]) as StoredAuditLog[]},session);
-    return Response.json({...permittedSnapshot(snapshot(scoped.users,scoped.loans,scoped.collections,scoped.audit_logs),permissions,session.role),session},{headers:{'Cache-Control':'no-store','X-FundFlow-Storage':'supabase'}});
+    return Response.json({...permittedSnapshot(snapshot(scoped.users,scoped.loans,scoped.collections,scoped.audit_logs,pr.data||[]),permissions,session.role),session},{headers:{'Cache-Control':'no-store','X-FundFlow-Storage':'supabase'}});
   }catch(error){return fail(error)}
 }
 
@@ -167,14 +172,14 @@ export async function POST(request:Request){
         else{const existing=await getSupabaseAdmin().from('loans').select('*').eq('id',String(body.id)).single();ok(existing.error);oldLoan=existing.data as StoredLoan}
         if(!oldLoan)throw new ApiError('Loan not found',404);start=oldLoan.given_date;
       }
-      if(action==='create_loan'||oldLoan?.interest_model===UPFRONT_MODEL){
+      if(action==='create_loan'||isUpfrontModel(oldLoan?.interest_model)){
         try{const terms=upfrontTerms(String(start),String(body.repayment_frequency||oldLoan?.repayment_frequency||'yearly'));body.repayment_frequency=terms.repayment_frequency;body.end_date=terms.end_date;body.next_due_date=action==='create_loan'?terms.first_due_date:oldLoan!.next_due_date;upfrontInterest(oldLoan?.principal??Number(body.principal),Number(body.interest_rate??0));}catch(e){throw new ApiError(e instanceof Error?e.message:'Invalid loan terms')}
       }
-      if(!validDate(start)||!validDate(body.end_date)||!validDate(body.next_due_date)||body.end_date<start||body.next_due_date<start||(oldLoan?.interest_model!==UPFRONT_MODEL&&body.next_due_date>body.end_date))throw new ApiError('Valid start, due and end dates are required. Due date must be between start and end dates.');
+      if(!validDate(start)||!validDate(body.end_date)||!validDate(body.next_due_date)||body.end_date<start||body.next_due_date<start||(!isUpfrontModel(oldLoan?.interest_model)&&body.next_due_date>body.end_date))throw new ApiError('Valid start, due and end dates are required. Due date must be between start and end dates.');
       try{
         if(action==='create_loan')body._entity_id=loanNumber(body.loan_number);
         flatInterest(oldLoan?.principal??Number(body.principal),Number(body.interest_rate??0));
-        if(oldLoan?.interest_model!==UPFRONT_MODEL)installmentDates(body.next_due_date,body.end_date,String(body.repayment_frequency||oldLoan?.repayment_frequency||'yearly'));
+        if(!isUpfrontModel(oldLoan?.interest_model))installmentDates(body.next_due_date,body.end_date,String(body.repayment_frequency||oldLoan?.repayment_frequency||'yearly'));
         if(action==='create_loan'&&String(body.interest_type||'fixed')!=='fixed')throw new Error('New loans use flat interest on original principal for the entire term.');
         if(oldLoan)refreshFlatLoan({...oldLoan,interest_rate:Number(body.interest_rate),end_date:body.end_date,next_due_date:body.next_due_date,repayment_frequency:String(body.repayment_frequency||oldLoan.repayment_frequency)},oldLoan);
       }catch(error){throw new ApiError(error instanceof Error?error.message:'Invalid loan terms')}

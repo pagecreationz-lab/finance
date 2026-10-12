@@ -26,7 +26,7 @@ const decision=(id,action='approve')=>({action,id});
  assert.equal((await post(decision(body.id))).status,403);
  const reviews=await Promise.all([post(decision(body.id),manager),post(decision(body.id),manager)]);assert.deepEqual(reviews.map(r=>r.status).sort(),[200,400]);
  d=await store.readLocalStore();const loan=d.loans.find(l=>l.id===body.loan_number),customer=d.users.find(u=>u.id===loan.customer_id);
- assert.equal(customer.name,body.new_customer.name);assert.equal(customer.assigned_agent_id,agent.id);assert.equal(loan.balance,26400);
+ assert.equal(customer.name,body.new_customer.name);assert.equal(customer.assigned_agent_id,agent.id);assert.equal(loan.balance,30000);
  const rejected=make();await post(rejected);await post(decision(rejected.id,'reject'),manager);d=await store.readLocalStore();assert.ok(!d.users.some(u=>u.id==='customer-loan-'+rejected.id));assert.ok(!d.loans.some(l=>l.id===rejected.loan_number));
  const conflict=make();await post(conflict);
  await store.mutateLocalStore(d=>d.loans.push({...loan,id:conflict.loan_number,balance:loan.principal}));

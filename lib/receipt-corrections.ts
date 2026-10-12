@@ -17,7 +17,7 @@ export function correctLocal(data:LocalFinanceData,body:Record<string,unknown>,s
    const current=effectiveCollections(data.collections,corrections).find(r=>r.id===body.receipt_id);
    if(!current)throw new Error('Receipt not found');
    if((body.base_revision||null)!==current.correction_id||Number(body.before_amount)!==current.amount)throw new Error('Receipt changed. Refresh and submit a new correction.');
-   const amount=Number(body.amount);if(!Number.isSafeInteger(amount)||amount<0||amount===current.amount)throw new Error('Enter a different non-negative whole-rupee amount.');
+   const amount=Number(body.amount);if(amount<Number(current.penalty_amount||0))throw new Error('A correction cannot reverse an approved penalty. Correct only the installment portion.');if(!Number.isSafeInteger(amount)||amount<0||amount===current.amount)throw new Error('Enter a different non-negative whole-rupee amount.');
    c={id:String(body.id),receipt_id:current.id,loan_id:current.loan_id,before_amount:current.amount,after_amount:amount,base_revision:current.correction_id,reason:correctionReason(body.reason),requested_by:session.id,requested_name:session.name,created_at:now,status:'pending'};
    const loan=data.loans.find(l=>l.id===c.loan_id);if(!loan||loan.status==='foreclosed')throw new Error('Reopen the foreclosed loan before correcting a receipt.');
    corrections.unshift(c);data.audit_logs.unshift(createAuditLog(session,'receipt_correction_requested',c as unknown as Record<string,unknown>,now));
