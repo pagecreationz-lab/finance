@@ -86,9 +86,15 @@ const {PGlite}=require(process.argv[2]),fs=require('node:fs'),path=require('node
  await penaltyCall({action:'approve',id:prop.id},'manager','manager');
  await assert.rejects(penaltyCall({action:'approve',id:prop.id},'admin','admin'),/Pending request/);
  await assert.rejects(receipt('PRINCIPAL',100),/Collect exactly/);
+ const auditId=(await db.query('select id from audit_logs limit 1')).rows[0].id;
+ await assert.rejects(db.query('select rmv_record_collection($1::jsonb,$2,$3,$4::jsonb)',[JSON.stringify({id:'ROLLBACK-TEST',loan_id:'PRINCIPAL',amount:150,method:'Cash',collected_at:1}), 'agent','agent',JSON.stringify({id:auditId})]),/duplicate key/);
+ assert.equal(Number((await db.query("select count(*) n from collections where id='ROLLBACK-TEST'")).rows[0].n),0);
+ assert.equal((await db.query('select status from penalty_requests where id=$1',[prop.id])).rows[0].status,'approved');
+ assert.equal(Number((await db.query("select balance from loans where id='PRINCIPAL'")).rows[0].balance),9900);
  await receipt('PRINCIPAL',150);
  assert.equal(Number((await db.query("select balance from loans where id='PRINCIPAL'")).rows[0].balance),9800);
  const penaltyReceipt=(await db.query('select * from collection_ledger where penalty_amount=50')).rows[0];assert.equal(Number(penaltyReceipt.amount),150);
+ await assert.rejects(db.query('update penalty_requests set amount=999 where id=$1',[prop.id]),/Invalid penalty transition|immutable/);
  assert.equal((await db.query('select status from penalty_requests where id=$1',[prop.id])).rows[0].status,'collected');
  await assert.rejects(receipt('PRINCIPAL',150),/Collect exactly/);await receipt('PRINCIPAL',100);
  await assert.rejects(db.query('select rmv_correct_receipt($1::jsonb,$2,$2,$3)',[JSON.stringify({action:'request',id:crypto.randomUUID(),receipt_id:penaltyReceipt.id,amount:0,before_amount:150,base_revision:null,reason:'Reverse receipt for testing'}),'admin','admin']),/Cannot reverse/);

@@ -18,6 +18,24 @@ create index penalty_agent_created on public.penalty_requests(requested_by,creat
 alter table public.penalty_requests enable row level security;
 revoke all on public.penalty_requests from public,anon,authenticated;
 grant select,insert,update on public.penalty_requests to service_role;
+grant select,insert on public.collections to service_role;
+grant select,update on public.loans to service_role;
+grant select on public.users,public.role_permissions to service_role;
+grant insert on public.audit_logs to service_role;
+
+create or replace function public.rmv_penalty_history_guard() returns trigger language plpgsql security invoker set search_path='' as $$
+begin
+ if TG_OP='DELETE' then raise exception 'Penalty history cannot be deleted';end if;
+ if new is not distinct from old then return new;end if;
+ if old.status='pending' and new.status in ('approved','rejected') then
+  if (to_jsonb(new)-array['status','reviewed_by','reviewed_name','reviewed_at']) is distinct from (to_jsonb(old)-array['status','reviewed_by','reviewed_name','reviewed_at']) then raise exception 'Penalty proposals are immutable';end if;
+ elsif old.status='approved' and new.status='collected' then
+  if (to_jsonb(new)-array['status','receipt_id']) is distinct from (to_jsonb(old)-array['status','receipt_id']) then raise exception 'Penalty decisions are immutable';end if;
+ else raise exception 'Invalid penalty transition';end if;
+ return new;
+end $$;
+create trigger rmv_penalty_history before update or delete on public.penalty_requests for each row execute function public.rmv_penalty_history_guard();
+revoke all on function public.rmv_penalty_history_guard() from public,anon,authenticated;
 
 create or replace function public.rmv_penalty_dates(l public.loans) returns date[] language plpgsql security invoker set search_path='' as $$
 declare dates date[]; result date[]='{}'; total bigint; base bigint; extra bigint; cumulative bigint=0; i integer;

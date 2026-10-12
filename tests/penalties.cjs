@@ -27,6 +27,9 @@ const pay=(amount,actor=agent)=>route.POST(request({action:'create_collection',l
  r=await pay(150);assert.equal(r.status,200,await r.text());
  let data=await store.readLocalStore();assert.equal(data.loans.find(l=>l.id==='PENALTY-TEST').balance,9900);assert.equal(data.penalty_requests[0].status,'collected');assert.equal(data.collections[0].penalty_amount,50);
  const receipt=data.collections[0];assert.equal((await corrections.POST(request({action:'request',id:crypto.randomUUID(),receipt_id:receipt.id,before_amount:150,amount:0,base_revision:null,reason:'Reverse payment for testing'},admin))).status,400);
+ const html=require('../lib/receipt-download.ts').receiptHtml({...receipt,customer_name:'Test'});assert.match(html,/Approved penalty/);assert.match(html,/Installment portion/);
+ const fetched=await (await route.GET(request(null,agent))).json();assert.equal(fetched.loans.find(l=>l.id==='PENALTY-TEST').paid,100);
+ await assert.rejects(store.mutateLocalStore(d=>{d.penalty_requests[0].amount=999}),/Invalid penalty transition|immutable/);
  assert.equal((await pay(150)).status,400);assert.equal((await pay(100)).status,200);
  const next={...proposal,id:crypto.randomUUID(),missed_dates:['2020-01-03']};assert.equal((await call(next)).status,200);assert.equal((await call({action:'reject',id:next.id},admin)).status,200);
  const next2={...next,id:crypto.randomUUID()};assert.equal((await call(next2)).status,200);assert.equal((await call({action:'approve',id:next2.id},admin)).status,200);

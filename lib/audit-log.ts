@@ -44,7 +44,7 @@ function metadata(action:AuditAction,body:Record<string,unknown>){
   if(action==='update_loan')return {end_date:body.end_date,repayment_frequency:body.repayment_frequency,interest_rate:Number(body.interest_rate),next_due_date:body.next_due_date,remarks:body.remarks||null};
   if(action==='foreclose_loan')return {settlement_amount:Number(body.amount),waived_amount:body.waived_amount,original_balance:body.original_balance,remarks:body.remarks,proof_file_key:body.proof_file_key||null};
   if(action==='reopen_loan')return {restored_balance:Number(body.restored_balance),reason:body.reason,previous_foreclosure:body.previous_foreclosure};
-  if(action==='create_collection'||action==='update_collection')return {loan_id:body.loan_id||null,amount:Number(body.amount),method:body.method,remarks:body.remarks||null,signature_attached:Boolean(body.customer_signature),proof_attached:Boolean(body.proof_file_key)};
+  if(action==='create_collection'||action==='update_collection')return {loan_id:body.loan_id||null,amount:Number(body.amount),penalty_amount:Number(body.penalty_amount||0),installment_amount:Number(body.installment_amount??body.amount),method:body.method,remarks:body.remarks||null,signature_attached:Boolean(body.customer_signature),proof_attached:Boolean(body.proof_file_key)};
   if(action==='create_agent'||action==='update_agent')return {name:body.name,phone:body.phone,username:body.username,password_changed:Boolean(body.password)};
   if(action==='delete_agent')return {agent_id:body.id};
   if(action==='update_admin_profile')return {name:body.name,username:body.username,password_changed:Boolean(body.password_changed)};
