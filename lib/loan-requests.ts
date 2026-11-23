@@ -11,7 +11,7 @@ export type LoanRequest=LoanInput&{id:string;agent_id:string;agent_name:string;c
 export function loanInput(body:Record<string,unknown>):LoanInput{
  const customer_id=String(body.customer_id||''),principal=Number(body.principal),interest_rate=Number(body.interest_rate),interest_type=String(body.interest_type||'fixed'),repayment_frequency=String(body.repayment_frequency||''),security_type=String(body.security_type||'asset'),remarks=String(body.remarks||'').trim();
  const given_date=String(body.given_date||'');
- const terms=upfrontTerms(given_date,repayment_frequency),next_due_date=terms.first_due_date,end_date=terms.end_date;
+ const terms=upfrontTerms(given_date,repayment_frequency,String(body.end_date||'')),next_due_date=terms.first_due_date,end_date=terms.end_date;
  const new_customer=body.new_customer?customerInput(body.new_customer as Record<string,unknown>):null;
  if((!customer_id&&!new_customer)||(customer_id&&new_customer)||customer_id.length>100||!Number.isSafeInteger(principal)||principal<=0||body.interest_rate===undefined||body.interest_rate===null||body.interest_rate===''||!Number.isFinite(interest_rate)||interest_rate<0||!['fixed','floating'].includes(interest_type)||!['daily','weekly','monthly','yearly'].includes(repayment_frequency)||!['asset','surety'].includes(security_type)||remarks.length>2000)throw new Error('Enter a valid customer, whole-rupee loan amount, interest rate, return basis and security type.');
  if(!validDate(given_date)||!validDate(next_due_date)||!validDate(end_date)||given_date<'1900-01-01'||end_date<given_date||next_due_date<given_date||next_due_date>end_date)throw new Error('Valid start, due and end dates are required; due date must fall between start and end.');

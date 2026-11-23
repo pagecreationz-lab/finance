@@ -1294,3 +1294,85 @@ create trigger rmv_penalty_receipt_guard before update on public.collections for
 revoke all on function public.rmv_penalty_safety() from public,anon,authenticated;
 commit;
 notify pgrst,'reload schema';
+
+-- Catch-up collections: all unpaid installments due through today.
+begin;
+-- No balance, receipt, approval or historical schedule is rewritten.
+create or replace function public.rmv_due_through_today(l public.loans)
+returns bigint language plpgsql security invoker set search_path='' as $$
+declare total bigint;dates date[];base bigint;extra bigint;credited bigint;cumulative bigint=0;
+ installment bigint;due bigint=0;i integer;n integer;today date=(now() at time zone 'Asia/Kolkata')::date;
+begin
+ if l.status in ('closed','foreclosed') or l.balance<=0 then return 0;end if;
+ if l.interest_model='upfront_principal_v2' then total=l.principal;dates=public.rmv_upfront_dates(l.given_date,l.repayment_frequency);
+ elsif l.interest_model='upfront_net_v1' then total=l.principal-public.rmv_upfront_interest(l.principal,l.interest_rate);dates=public.rmv_upfront_dates(l.given_date,l.repayment_frequency);
+ elsif l.interest_model='flat_term_v1' then total=l.principal+public.rmv_term_interest(l.principal,l.interest_rate);dates=public.rmv_installment_dates(coalesce(l.first_due_date,l.next_due_date),l.end_date,l.repayment_frequency);
+ else raise exception 'Loan schedule requires admin review before collection';end if;
+ if l.balance>total then raise exception 'Invalid loan balance';end if;
+ n=cardinality(dates);base=total/n;extra=total%n;credited=total-l.balance;
+ for i in 1..n loop
+  installment=base+case when i<=extra then 1 else 0 end;
+  if dates[i]<=today then due=due+greatest(0,installment-least(installment,greatest(0,credited-cumulative)));end if;
+  cumulative=cumulative+installment;
+ end loop;
+ return due;
+end $$;
+revoke all on function public.rmv_due_through_today(public.loans) from public,anon,authenticated;
+grant execute on function public.rmv_due_through_today(public.loans) to service_role;
+
+-- Keep the existing loan lock, assignment/RBAC checks and atomic penalty allocation.
+do $migration$
+declare definition text;
+begin
+ if to_regclass('public.penalty_requests') is null then raise exception 'Apply agent penalty approval first';end if;
+ select pg_get_functiondef('public.rmv_record_collection(jsonb,text,text,jsonb)'::regprocedure) into definition;
+ if position('public.rmv_due_through_today(l)' in definition)>0 then return;end if;
+ if position('public.rmv_exact_installment(l)' in definition)=0 or position('penalty>0' in definition)=0 then raise exception 'Unexpected collection function. Apply agent penalty approval first';end if;
+ definition=replace(definition,'public.rmv_exact_installment(l)','public.rmv_due_through_today(l)');
+ definition=replace(definition,'including approved penalty. Refresh before retrying.','for all unpaid installments due through today plus approved penalty. Refresh before retrying.');
+ execute definition;
+end $migration$;
+commit;
+notify pgrst,'reload schema';
+
+-- Custom monthly collection term (20261123061734).
+begin;
+-- Preserve historical yearly (12-month) schedules; new monthly loans use an explicit end date.
+create or replace function public.rmv_loan_dates(start_date date,frequency text,end_date date)
+returns date[] language plpgsql immutable security invoker set search_path='' as $$
+declare dates date[]='{}';m date;d date;i integer;day_no integer=extract(day from start_date)::integer;
+begin
+ if frequency<>'monthly' then return public.rmv_upfront_dates(start_date,frequency);end if;
+ if start_date is null or start_date<date '1900-01-01' or end_date is null or end_date<=start_date then raise exception 'Monthly loans require a start date and an end date after the start date';end if;
+ for i in 1..1200 loop
+  m=(date_trunc('month',start_date)+i*interval '1 month')::date;
+  d=m+least(day_no,extract(day from (m+interval '1 month - 1 day'))::integer)-1;
+  if d>=end_date then return array_append(dates,end_date);end if;
+  dates=array_append(dates,d);
+ end loop;
+ raise exception 'Monthly loans cannot exceed 1,200 collection periods';
+end $$;
+revoke all on function public.rmv_loan_dates(date,text,date) from public,anon,authenticated;
+grant execute on function public.rmv_loan_dates(date,text,date) to service_role;
+
+do $migration$
+declare definition text;signature text;
+begin
+ foreach signature in array array['public.rmv_calculate_upfront_loan()','public.rmv_exact_installment(public.loans)','public.rmv_due_through_today(public.loans)','public.rmv_loan_request(jsonb,text,text,text)'] loop
+  if to_regprocedure(signature) is null then raise exception 'Missing prerequisite: %. Apply existing repayment, approval and catch-up migrations first.',signature;end if;
+  select pg_get_functiondef(to_regprocedure(signature)) into definition;
+  if position('public.rmv_loan_dates(' in definition)>0 then continue;end if;
+  if position('public.rmv_upfront_dates(' in definition)=0 then raise exception 'Unexpected function version: %',signature;end if;
+  definition=replace(definition,'public.rmv_upfront_dates(new.given_date,new.repayment_frequency)','public.rmv_loan_dates(new.given_date,new.repayment_frequency,new.end_date)');
+  definition=replace(definition,'public.rmv_upfront_dates(l.given_date,l.repayment_frequency)','public.rmv_loan_dates(l.given_date,l.repayment_frequency,l.end_date)');
+  definition=replace(definition,'public.rmv_upfront_dates((p_body->>''given_date'')::date,p_body->>''repayment_frequency'')','public.rmv_loan_dates((p_body->>''given_date'')::date,p_body->>''repayment_frequency'',(p_body->>''end_date'')::date)');
+  definition=replace(definition,'if new.repayment_frequency=''monthly'' then new.repayment_frequency=''yearly''; end if;','-- Monthly frequency and the selected end date are retained.');
+  definition=replace(definition,'case when p_body->>''repayment_frequency''=''monthly'' then ''yearly'' else p_body->>''repayment_frequency'' end','p_body->>''repayment_frequency''');
+  definition=replace(definition,'(new.principal,new.interest_rate,new.given_date,new.repayment_frequency) is distinct from (old.principal,old.interest_rate,old.given_date,old.repayment_frequency)','(new.principal,new.interest_rate,new.given_date,new.repayment_frequency,new.end_date) is distinct from (old.principal,old.interest_rate,old.given_date,old.repayment_frequency,old.end_date)');
+  if position('public.rmv_loan_dates(' in definition)=0 then raise exception 'Unable to upgrade schedule function: %',signature;end if;
+  execute definition;
+ end loop;
+end $migration$;
+-- No UPDATE of loans, requests, collections or balances: existing records are untouched.
+commit;
+notify pgrst,'reload schema';

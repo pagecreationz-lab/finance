@@ -66,7 +66,18 @@ export function refreshFlatLoan(loan:CalculatedLoan,previous?:CalculatedLoan){
 }
 export function loanSummary(loan:CalculatedLoan){
  if(loan.interest_model!==FLAT_MODEL&&!isUpfrontModel(loan.interest_model))return {};
- const {schedule,...summary}=loanCalculation(loan);void schedule;return summary;
+ const {schedule,...summary}=loanCalculation(loan);void schedule;return {...summary,due_through_today:dueThroughToday(loan)};
+}
+// Credits are allocated oldest-first by loanCalculation. Never collect future dates.
+export function dueThroughToday(loan:CalculatedLoan,today=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Kolkata',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date())):number {
+ if(loan.interest_model!==FLAT_MODEL&&!isUpfrontModel(loan.interest_model))throw new Error('Loan schedule requires admin review before collection.');
+ if(['closed','foreclosed'].includes(loan.status)||loan.balance<=0)return 0;
+ return loanCalculation(loan,today).schedule.filter(row=>row.date<=today).reduce((sum,row)=>sum+row.due,0);
+}
+export function dueCollectionAmount(loan:CalculatedLoan):number {
+ const amount=dueThroughToday(loan);
+ if(!Number.isSafeInteger(amount)||amount<=0)throw new Error('No unpaid installments due through today. Future installments are not included.');
+ return amount;
 }
 export function exactCollectionAmount(loan:CalculatedLoan):number {
  if(loan.interest_model!==FLAT_MODEL&&!isUpfrontModel(loan.interest_model))throw new Error('Loan schedule requires admin review before collection.');

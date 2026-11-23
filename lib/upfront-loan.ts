@@ -8,9 +8,21 @@ export function upfrontInterest(principal:number,rate:number){
  if(interest>=principal)throw new Error('Amount remaining after interest must be positive.');
  return interest;
 }
-export function upfrontTerms(start:string,frequency:string){
- if(!validDate(start)||start<'1900-01-01'||!['daily','weekly','monthly','yearly'].includes(frequency))throw new Error('Enter a valid start date and Daily, Weekly or Yearly loan type.');
- const basis=frequency==='monthly'?'yearly':frequency,count=basis==='daily'?100:basis==='weekly'?10:12,anchor=new Date(start+'T00:00:00Z');
+export function upfrontTerms(start:string,frequency:string,end?:string|null){
+ if(frequency==='monthly'){
+  if(!validDate(start)||start<'1900-01-01'||!validDate(end)||end<=start)throw new Error('Monthly loans require a start date and an end date after the start date.');
+  const anchor=new Date(start+'T00:00:00Z'),dates:string[]=[];
+  for(let i=1;i<=1200;i++){
+   const d=new Date(Date.UTC(anchor.getUTCFullYear(),anchor.getUTCMonth()+i,1));
+   d.setUTCDate(Math.min(anchor.getUTCDate(),new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,0)).getUTCDate()));
+   const date=d.toISOString().slice(0,10);
+   if(date>=end){dates.push(end);return {repayment_frequency:'monthly',first_due_date:dates[0],end_date:end,dates};}
+   dates.push(date);
+  }
+  throw new Error('Monthly loans cannot exceed 1,200 collection periods.');
+ }
+ if(!validDate(start)||start<'1900-01-01'||!['daily','weekly','yearly'].includes(frequency))throw new Error('Enter a valid start date and Daily, Weekly or Monthly loan type.');
+ const basis=frequency,count=basis==='daily'?100:basis==='weekly'?10:12,anchor=new Date(start+'T00:00:00Z');
  const dates=Array.from({length:count},(_,i)=>{
   const d=new Date(anchor),step=basis==='daily'?i:i+1;
   if(basis==='daily'||basis==='weekly')d.setUTCDate(d.getUTCDate()+step*(basis==='weekly'?7:1));
@@ -21,7 +33,7 @@ export function upfrontTerms(start:string,frequency:string){
 }
 export function upfrontCalculation(loan:CalculatedLoan,today=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Kolkata',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date())){
  const interest=upfrontInterest(Number(loan.principal),Number(loan.interest_rate)),total=Number(loan.principal)-(loan.interest_model==='upfront_net_v1'?interest:0);
- const terms=upfrontTerms(loan.given_date,loan.repayment_frequency),count=terms.dates.length,base=Math.floor(total/count),extra=total%count;
+ const terms=upfrontTerms(loan.given_date,loan.repayment_frequency,loan.end_date),count=terms.dates.length,base=Math.floor(total/count),extra=total%count;
  const paid=Math.max(0,total-Number(loan.balance));let cumulative=0;
  const schedule=terms.dates.map((date,i)=>{const amount=base+(i<extra?1:0),applied=Math.min(amount,Math.max(0,paid-cumulative));cumulative+=amount;return {date,amount,paid:applied,due:amount-applied}});
  const settled=loan.balance===0||['closed','foreclosed'].includes(loan.status),next=schedule.find(r=>r.due>0);
@@ -30,7 +42,8 @@ export function upfrontCalculation(loan:CalculatedLoan,today=new Intl.DateTimeFo
 export function refreshUpfrontLoan(loan:CalculatedLoan,previous?:CalculatedLoan){
  if(previous&&['closed','foreclosed'].includes(previous.status)&&(loan.principal!==previous.principal||loan.interest_rate!==previous.interest_rate||loan.given_date!==previous.given_date||loan.repayment_frequency!==previous.repayment_frequency))throw new Error('Settled loan terms cannot be changed.');
  if(loan.interest_type!=='fixed')throw new Error('Upfront interest loans require a fixed deduction rate.');
- const interest=upfrontInterest(loan.principal,loan.interest_rate),terms=upfrontTerms(loan.given_date,loan.repayment_frequency);
+ if(previous&&['closed','foreclosed'].includes(previous.status)&&loan.end_date!==previous.end_date)throw new Error('Settled loan terms cannot be changed.');
+ const interest=upfrontInterest(loan.principal,loan.interest_rate),terms=upfrontTerms(loan.given_date,loan.repayment_frequency,loan.end_date);
  const total=loan.principal-(loan.interest_model==='upfront_net_v1'?interest:0);
  if(previous&&isUpfrontModel(previous.interest_model))loan.balance+=total-(previous.principal-(previous.interest_model==='upfront_net_v1'?Number(previous.interest_amount||0):0));
  if(loan.balance<0||loan.balance>total)throw new Error('Revised repayable amount cannot be below existing credits or below the balance.');

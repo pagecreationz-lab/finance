@@ -3,7 +3,7 @@ import { validSignature, validDate } from '@/lib/collection-records';
 import {loanNumber} from '@/lib/loan-number';
 import {approvedPenalty} from '@/lib/penalties';
 import {UPFRONT_MODEL,isUpfrontModel,upfrontTerms,upfrontInterest} from '@/lib/upfront-loan';
-import {loanSummary,flatInterest,installmentDates,refreshFlatLoan,exactCollectionAmount} from '@/lib/loan-calculation';
+import {loanSummary,flatInterest,installmentDates,refreshFlatLoan,dueCollectionAmount} from '@/lib/loan-calculation';
 import { getSupabaseAdmin, hasSupabaseConfig } from '@/lib/supabase-admin';
 import { AuthError, hashPassword, requireAdmin, requireSession, type AppSession } from '@/lib/auth';
 import { mutateLocalStore, readLocalStore, type LocalFinanceData, type StoredAuditLog, type StoredCollection, type StoredLoan, type StoredUser } from '@/lib/local-data-store';
@@ -35,7 +35,7 @@ function snapshot(users:StoredUser[], loanRows:StoredLoan[], collectionRows:Stor
     const customer=userById.get(loan.customer_id);
     const receiptPaid=collectionRows.filter(item=>item.loan_id===loan.id).reduce((sum,item)=>sum+n(item.amount)-n(item.penalty_amount),0);
     const calculated=loanSummary(loan);
-    return {...loan,...calculated,approved_penalty:approvedPenalty(penalties,loan.id),next_collection_amount:Number(('next_installment_due' in calculated?calculated.next_installment_due:0)||0)+approvedPenalty(penalties,loan.id),customer_name:customer?.name||'Unknown customer',phone:customer?.phone||'',assigned_agent_id:customer?.assigned_agent_id||null,agent_name:customer?.assigned_agent_id?userById.get(customer.assigned_agent_id)?.name||null:null,paid:receiptPaid+(loan.status==='foreclosed'?n(loan.foreclosure_amount):0)};
+    return {...loan,...calculated,approved_penalty:approvedPenalty(penalties,loan.id),next_collection_amount:Number(('due_through_today' in calculated?calculated.due_through_today:0)||0)>0?Number(('due_through_today' in calculated?calculated.due_through_today:0)||0)+approvedPenalty(penalties,loan.id):0,customer_name:customer?.name||'Unknown customer',phone:customer?.phone||'',assigned_agent_id:customer?.assigned_agent_id||null,agent_name:customer?.assigned_agent_id?userById.get(customer.assigned_agent_id)?.name||null:null,paid:receiptPaid+(loan.status==='foreclosed'?n(loan.foreclosure_amount):0)};
   });
   const collections=collectionRows.map(item=>{
     const loan=loanById.get(item.loan_id),customer=loan?userById.get(loan.customer_id):undefined;
@@ -91,8 +91,8 @@ async function localAction(body:Record<string,unknown>,session:AppSession) {
       const penalty=approvedPenalty(data.penalty_requests,loanId);
       if(['closed','foreclosed'].includes(loan.status))throw new ApiError('Loan is closed');if(amount>n(loan.balance)+penalty)throw new ApiError('Collection cannot exceed the outstanding balance plus approved penalties');
       if(session.role==='agent'||penalty>0){
-        let expected:number;try{expected=exactCollectionAmount(loan)+penalty}catch(error){throw new ApiError(error instanceof Error?error.message:'Invalid loan schedule')}
-        if(amount!==expected)throw new ApiError(`Collect exactly ₹${expected} for the next installment. Refresh the loan before retrying.`);
+        let expected:number;try{expected=dueCollectionAmount(loan)+penalty}catch(error){throw new ApiError(error instanceof Error?error.message:'Invalid loan schedule')}
+        if(amount!==expected)throw new ApiError(`Collect exactly ₹${expected}: all unpaid installments due through today plus approved penalties. Refresh the loan before retrying.`);
       }
       data.collections.unshift({id:String(body._entity_id),loan_id:loanId,agent_id:session.role==='agent'?session.id:null,collected_by_name:session.name,amount,penalty_amount:penalty,method:String(body.method||'Cash'),proof_file_key:String(body.proof_file_key||'')||null,remarks:String(body.remarks||'')||null,collected_at:now,customer_signature:validSignature(body.customer_signature)?body.customer_signature:null,signature_at:validSignature(body.customer_signature)?now:null});
       for(const p of data.penalty_requests||[])if(p.loan_id===loanId&&p.status==='approved'){p.status='collected';p.receipt_id=String(body._entity_id);}
@@ -173,7 +173,7 @@ export async function POST(request:Request){
         if(!oldLoan)throw new ApiError('Loan not found',404);start=oldLoan.given_date;
       }
       if(action==='create_loan'||isUpfrontModel(oldLoan?.interest_model)){
-        try{const terms=upfrontTerms(String(start),String(body.repayment_frequency||oldLoan?.repayment_frequency||'yearly'));body.repayment_frequency=terms.repayment_frequency;body.end_date=terms.end_date;body.next_due_date=action==='create_loan'?terms.first_due_date:oldLoan!.next_due_date;upfrontInterest(oldLoan?.principal??Number(body.principal),Number(body.interest_rate??0));}catch(e){throw new ApiError(e instanceof Error?e.message:'Invalid loan terms')}
+        try{const terms=upfrontTerms(String(start),String(body.repayment_frequency||oldLoan?.repayment_frequency||'monthly'),String(body.end_date||oldLoan?.end_date||''));body.repayment_frequency=terms.repayment_frequency;body.end_date=terms.end_date;body.next_due_date=action==='create_loan'?terms.first_due_date:oldLoan!.next_due_date;upfrontInterest(oldLoan?.principal??Number(body.principal),Number(body.interest_rate??0));}catch(e){throw new ApiError(e instanceof Error?e.message:'Invalid loan terms')}
       }
       if(!validDate(start)||!validDate(body.end_date)||!validDate(body.next_due_date)||body.end_date<start||body.next_due_date<start||(!isUpfrontModel(oldLoan?.interest_model)&&body.next_due_date>body.end_date))throw new ApiError('Valid start, due and end dates are required. Due date must be between start and end dates.');
       try{

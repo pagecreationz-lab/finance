@@ -4,9 +4,15 @@ Implemented for open 100-day daily loans using `upfront_principal_v2`.
 
 In **Collections → Missed-day penalties**, an assigned agent selects overdue unpaid dates and enters one whole-rupee total. The reason is optional. Admin Manager or Super Admin approves or rejects; neither enters charges through this feature. Agents cannot approve their own requests. Existing Collections/Loans permissions apply; entering a request also requires Record payments.
 
-Pending/rejected requests do not affect payments. Approved charges are added to the next recorded installment. For example, ₹100 installment + ₹50 approved penalty = exactly ₹150 collected, of which only ₹100 reduces principal. Receipts/downloads show the split. After collection the penalty is linked to that receipt and cannot be collected again. Dates already covered by a pending, approved or collected request cannot be charged twice. Approval rechecks assignment and unpaid dates.
+Pending/rejected requests do not affect payments. Approved charges are added to all unpaid installments due through today (Asia/Kolkata). For example, three unpaid ₹100 installments + ₹50 approved penalty = exactly ₹350 collected, of which only ₹300 reduces principal. Future installments are excluded; partial credits are subtracted. Receipts/downloads show the split. After collection the penalty is linked to that receipt and cannot be collected again. Dates already covered by a pending, approved or collected request cannot be charged twice. Approval rechecks assignment and unpaid dates.
 
 ## Database deployment (not run automatically)
+
+### Catch-up calculation update — 23 November 2026
+
+For an existing installation where the penalty migration already succeeded, run only `supabase/migrations/20261123053943_collect_all_due_installments.sql`, then deploy the updated app. Do not rerun the earlier migrations or the whole schema. Pause collections during the coordinated update so the app and database use the same rule. This migration changes the collection check only; it does not rewrite balances, approvals, receipts or schedules. It is safe to rerun.
+
+The form shows **Due through today + Approved penalty**. Once today's dues are paid, agents cannot collect future installments. Agent-only manual penalty entry and Admin Manager/Super Admin approval remain unchanged. Existing manager/admin payment flexibility remains unchanged when no approved penalty is present.
 
 Back up production first. Apply all existing prerequisite migrations, including receipt corrections and `20261012040751_upfront_principal_repayment.sql`, before the new migration. Do not rerun the whole consolidated schema on an existing database.
 
@@ -25,7 +31,7 @@ The first four results must exist, and the full-principal migration must already
 
 Apply **`supabase/migrations/20261012045946_agent_penalty_approval.sql` once**, then deploy the updated application. Local-file development needs no SQL. Application and database updates must be coordinated: the new data endpoint expects the penalty table/view column.
 
-Verify with a test assigned daily loan: submit ₹50, approve as manager, check next payment increased by ₹50, collect, and confirm principal decreased only by the installment. Also verify Super Admin approval and rejection.
+Verify with a test assigned daily loan: submit ₹50, approve as manager, check due-through-today collection total increased by ₹50, collect, and confirm principal decreased only by the installment. Also verify Super Admin approval and rejection.
 
 ## Safeguards and limits
 

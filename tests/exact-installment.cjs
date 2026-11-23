@@ -13,10 +13,11 @@ const request=body=>new Request('http://localhost/api/auth/login',{method:'POST'
  async function call(body,actor=admin){const r=request(body);r.headers.set('cookie',auth.createSessionCookie(actor,new Request('http://localhost')).split(';')[0]);return route.POST(r)}
  const created=await call({action:'create_customer',name:'Exact',phone:'1234567890',occupation:'Test',agent_id:agent.id});assert.equal(created.status,200);
  const customer=(await store.readLocalStore()).users.find(u=>u.name==='Exact');
- for(const [basis,amount] of [['daily',100],['weekly',1000],['yearly',834]]){
+ for(const basis of ['daily','weekly','yearly']){
   const id='EXACT-'+basis.toUpperCase();
   const response=await call({action:'create_loan',loan_number:id,customer_id:customer.id,principal:10000,interest_type:'fixed',interest_rate:10,repayment_frequency:basis,given_date:'2026-10-08'});assert.equal(response.status,200,await response.text());
   const pay=amount=>call({action:'create_collection',loan_id:id,amount,method:'Cash'},agent);
+  const amount=require('../lib/loan-calculation.ts').dueThroughToday((await store.readLocalStore()).loans.find(l=>l.id===id));
   assert.equal((await pay(amount-1)).status,400);assert.equal((await pay(amount+1)).status,400);
   assert.equal((await store.readLocalStore()).loans.find(l=>l.id===id).balance,10000);
   assert.equal((await pay(amount)).status,200);
